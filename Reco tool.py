@@ -7,7 +7,7 @@ import base64
 import plotly.express as px
 from datetime import datetime
 
-# --- 1. GLOBAL CONFIGURATION (Sirf ek baar sabse upar aayega) ---
+# --- 1. GLOBAL CONFIGURATION ---
 st.set_page_config(layout="wide", page_title="E-commerce Reconciliation Master Tool")
 
 # --- SIDEBAR NAVIGATION ---
@@ -277,9 +277,30 @@ def run_amazon_tool():
         st.info("Please upload Amazon Payment (Zip) and MTR (CSV) files in the sidebar.")
 
 # ==========================================
-# MODULE 2: AJIO RECONCILIATION LOGIC
+# MODULE 2: AJIO RECONCILIATION LOGIC (Full Version)
 # ==========================================
 def run_ajio_tool():
+    # --- Custom CSS to Restore Look ---
+    st.markdown("""
+        <style>
+        div[data-testid="stMetric"] {
+            background-color: var(--secondary-background-color) !important;
+            border-left: 5px solid #FF4B4B;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0px 2px 4px rgba(0,0,0,0.1);
+        }
+        div[data-testid="stMetricLabel"] > div {
+            opacity: 0.8;
+            font-size: 0.9rem;
+        }
+        div[data-testid="stMetricValue"] > div {
+            font-size: 1.5rem;
+            font-weight: 700;
+        }
+        </style>
+        """, unsafe_allow_html=True)
+
     st.title("📊 Ajio Seller Reconciliation")
     st.caption("Automated System | Consolidated View")
     
@@ -297,102 +318,290 @@ def run_ajio_tool():
         except: return 0.0
 
     def parse_ajio_date(date_str):
-        if not isinstance(date_str, str) or not date_str.strip(): return None
+        if not isinstance(date_str, str) or not date_str.strip():
+            return None 
         clean_str = date_str.replace(" IST", "").strip()
-        try: return datetime.strptime(clean_str, "%a %b %d %H:%M:%S %Y")
+        try:
+            dt_obj = datetime.strptime(clean_str, "%a %b %d %H:%M:%S %Y")
+            return dt_obj 
         except ValueError:
-            try: return pd.to_datetime(date_str)
-            except: return None
+            try:
+                return pd.to_datetime(date_str)
+            except:
+                return None
 
-    def clean_order_id(series):
-        s = series.astype(str).str.replace(r'\.0$', '', regex=True)
-        return s.str.strip().str.upper().replace(['NAN', 'NULL', 'NONE', '0', '', 'NAT'], np.nan)
+    def get_first_val(series):
+        valid = series.dropna()
+        valid = valid[valid != '']
+        return valid.iloc[0] if not valid.empty else None
 
     def find_col(df, candidates):
         col_map = {c.lower().strip(): c for c in df.columns}
         for cand in candidates:
-            if cand.lower().strip() in col_map: return col_map[cand.lower().strip()]
+            if cand.lower().strip() in col_map:
+                return col_map[cand.lower().strip()]
         return None
+
+    def clean_order_id(series):
+        s = series.astype(str)
+        s = s.str.replace(r'\.0$', '', regex=True)
+        s = s.str.strip().str.upper()
+        s = s.replace(['NAN', 'NULL', 'NONE', '0', '', 'NAT'], np.nan)
+        return s
 
     # --- AJIO SIDEBAR INPUTS ---
     st.sidebar.subheader("Ajio Uploads")
     gst_file = st.sidebar.file_uploader("1. GST Report (Sales)", type=["csv", "xlsx"], key="ajio_gst")
     rtv_file = st.sidebar.file_uploader("2. RTV Report (Returns)", type=["csv", "xlsx"], key="ajio_rtv")
     payment_file = st.sidebar.file_uploader("3. Payment Report", type=["csv", "xlsx"], key="ajio_pay")
+    
+    st.sidebar.divider()
     run_btn = st.sidebar.button("🚀 Run Ajio Reconciliation", type="primary")
 
     if run_btn and gst_file and rtv_file and payment_file:
-        with st.spinner("Processing Ajio Data..."):
+        with st.spinner("Processing Data & Mapping Dates..."):
             try:
+                # 1. Load Data
                 def load_file(f):
-                    try: return pd.read_csv(f, encoding='utf-8-sig') if f.name.endswith('.csv') else pd.read_excel(f)
-                    except: return pd.read_csv(f, encoding='latin1') if f.name.endswith('.csv') else pd.read_excel(f)
+                    try:
+                        return pd.read_csv(f, encoding='utf-8-sig') if f.name.endswith('.csv') else pd.read_excel(f)
+                    except:
+                        return pd.read_csv(f, encoding='latin1') if f.name.endswith('.csv') else pd.read_excel(f)
 
                 df_gst = load_file(gst_file)
                 df_rtv = load_file(rtv_file)
                 df_pay = load_file(payment_file)
 
-                # Logic starts
+                # Strip Headers
+                df_gst.columns = df_gst.columns.str.strip()
+                df_rtv.columns = df_rtv.columns.str.strip()
+                df_pay.columns = df_pay.columns.str.strip()
+
+                # --- GST PROCESSING ---
                 gst_order_col = find_col(df_gst, ['Cust Order No', 'Order No', 'Order ID'])
-                gst_val_col = find_col(df_gst, ['Invoice Value', 'Total Value'])
-                
-                if not gst_order_col:
-                    st.error("GST File missing Order ID column")
+                gst_val_col = find_col(df_gst, ['Invoice Value', 'Total Value', 'Taxable Value'])
+                gst_qty_col = find_col(df_gst, ['Shipped QTY', 'Qty'])
+                gst_date_col = find_col(df_gst, ['Seller Invoice Date', 'Invoice Date'])
+
+                if not gst_order_col or not gst_val_col:
+                    st.error(f"❌ GST File Error: Missing columns. Found: {list(df_gst.columns)}")
                     st.stop()
-                
+
                 df_gst_clean = pd.DataFrame()
                 df_gst_clean['Cust Order No'] = clean_order_id(df_gst[gst_order_col])
                 df_gst_clean['Invoice Value'] = df_gst[gst_val_col].apply(clean_currency)
-                df_gst_clean = df_gst_clean.groupby('Cust Order No', as_index=False)['Invoice Value'].sum()
+                df_gst_clean = df_gst_clean.dropna(subset=['Cust Order No'])
+                
+                if gst_date_col:
+                    df_gst_clean['Invoice Date'] = df_gst[gst_date_col].astype(str).apply(parse_ajio_date)
+                else:
+                    df_gst_clean['Invoice Date'] = None
 
-                # RTV
+                gst_agg = {'Invoice Value': 'sum', 'Invoice Date': 'first'}
+                if gst_qty_col:
+                    df_gst_clean['Shipped QTY'] = df_gst[gst_qty_col]
+                    gst_agg['Shipped QTY'] = 'sum'
+                
+                df_gst_clean = df_gst_clean.groupby('Cust Order No', as_index=False).agg(gst_agg)
+
+                # --- RTV PROCESSING ---
                 rtv_order_col = find_col(df_rtv, ['Cust Order No', 'Order No'])
                 rtv_val_col = find_col(df_rtv, ['Return Value', 'Refund Amount'])
-                df_rtv_clean = pd.DataFrame()
-                if rtv_order_col:
-                    df_rtv_clean['Cust Order No'] = clean_order_id(df_rtv[rtv_order_col])
-                    df_rtv_clean['Return Value'] = df_rtv[rtv_val_col].apply(clean_currency) if rtv_val_col else 0.0
-                    df_rtv_clean = df_rtv_clean.groupby('Cust Order No', as_index=False)['Return Value'].sum()
-                else:
-                    df_rtv_clean['Cust Order No'] = []
-                    df_rtv_clean['Return Value'] = []
-
-                # Payment
-                pay_order_col = find_col(df_pay, ['Order No', 'Cust Order No'])
-                pay_val_col = find_col(df_pay, ['Value', 'Payment Amount', 'Net Amount'])
-                df_pay_clean = pd.DataFrame()
-                if pay_order_col:
-                    df_pay_clean['Cust Order No'] = clean_order_id(df_pay[pay_order_col])
-                    df_pay_clean['Payment Received'] = df_pay[pay_val_col].apply(clean_currency) if pay_val_col else 0.0
-                    df_pay_clean = df_pay_clean.groupby('Cust Order No', as_index=False)['Payment Received'].sum()
-
-                # Merge
-                df_recon = pd.merge(df_gst_clean, df_rtv_clean, on='Cust Order No', how='outer')
-                df_recon = pd.merge(df_recon, df_pay_clean, on='Cust Order No', how='left')
-                df_recon.fillna(0, inplace=True)
+                rtv_type_col = find_col(df_rtv, ['Return Type', 'Disposition', 'Reason'])
+                rtv_date_col = find_col(df_rtv, ['Return Created Date', 'Return Date'])
                 
+                if not rtv_order_col:
+                    st.error("❌ RTV File Error: Missing 'Cust Order No'")
+                    st.stop()
+
+                df_rtv_clean = pd.DataFrame()
+                df_rtv_clean['Cust Order No'] = clean_order_id(df_rtv[rtv_order_col])
+                df_rtv_clean = df_rtv_clean.dropna(subset=['Cust Order No'])
+
+                df_rtv_clean['Return Value'] = df_rtv[rtv_val_col].apply(clean_currency) if rtv_val_col else 0.0
+                df_rtv_clean['Return Type'] = df_rtv[rtv_type_col] if rtv_type_col else ''
+                
+                if rtv_date_col:
+                    df_rtv_clean['Return Date'] = df_rtv[rtv_date_col].astype(str).apply(parse_ajio_date)
+                else:
+                    df_rtv_clean['Return Date'] = None
+
+                rtv_agg = {'Return Value': 'sum', 'Return Type': get_first_val, 'Return Date': 'first'}
+                df_rtv_clean = df_rtv_clean.groupby('Cust Order No', as_index=False).agg(rtv_agg)
+
+                # --- PAYMENT PROCESSING ---
+                pay_order_col = find_col(df_pay, ['Order No', 'Cust Order No', 'Po Number'])
+                pay_val_col = find_col(df_pay, ['Value', 'Payment Amount', 'Net Amount', 'Amt'])
+                pay_date_col = find_col(df_pay, ['Expected settlement date', 'Settlement Date', 'Clearing date'])
+
+                if not pay_order_col:
+                    st.error("❌ Payment File Error: Missing 'Order No'")
+                    st.stop()
+
+                df_pay_clean = pd.DataFrame()
+                df_pay_clean['Cust Order No'] = clean_order_id(df_pay[pay_order_col])
+                df_pay_clean = df_pay_clean.dropna(subset=['Cust Order No'])
+
+                df_pay_clean['Payment Received'] = df_pay[pay_val_col].apply(clean_currency) if pay_val_col else 0.0
+                
+                # PARSE SETTLEMENT DATE
+                if pay_date_col:
+                    df_pay_clean['Settlement Date'] = df_pay[pay_date_col].astype(str).apply(parse_ajio_date)
+                else:
+                    df_pay_clean['Settlement Date'] = None
+
+                pay_agg = {'Payment Received': 'sum', 'Settlement Date': 'first'}
+                df_pay_clean = df_pay_clean.groupby('Cust Order No', as_index=False).agg(pay_agg)
+
+                # --- MERGE LOGIC ---
+                df_recon = pd.merge(df_gst_clean, df_rtv_clean, on='Cust Order No', how='outer', suffixes=('_GST', '_RTV'))
+                df_recon = pd.merge(df_recon, df_pay_clean, on='Cust Order No', how='left')
+
+                # Fill values
+                for col in ['Invoice Value', 'Return Value', 'Payment Received']:
+                    df_recon[col] = df_recon[col].fillna(0.0)
+                
+                df_recon['Return Type'] = df_recon['Return Type'].fillna('')
+
+                # --- CALCULATIONS ---
                 df_recon['Expected Payment'] = df_recon['Invoice Value'] - df_recon['Return Value']
-                df_recon['Final Difference'] = np.where(
-                    (df_recon['Invoice Value']>0) & (df_recon['Return Value']>0),
-                    df_recon['Expected Payment'],
-                    df_recon['Expected Payment'] - df_recon['Payment Received']
-                )
+                
+                def calculate_final_difference(row):
+                    if row['Invoice Value'] > 0 and row['Return Value'] > 0:
+                        return row['Expected Payment']
+                    else:
+                        return row['Expected Payment'] - row['Payment Received']
 
-                # Metrics
+                df_recon['Final Difference'] = df_recon.apply(calculate_final_difference, axis=1)
+                
+                # Rounding
+                df_recon['Final Difference'] = df_recon['Final Difference'].round(2)
+                df_recon['Expected Payment'] = df_recon['Expected Payment'].round(2)
+
+                # --- STATUS ---
+                def get_status(row):
+                    diff = row['Final Difference']
+                    if row['Payment Received'] == 0 and row['Expected Payment'] > 0 and row['Return Value'] == 0:
+                        return "🔴 Not Received"
+                    if abs(diff) <= 10:
+                        return "🟢 Settled"
+                    if diff > 10:
+                        return "⚠️ Less Payment"
+                    if diff < -10:
+                        return "🔵 Over Payment"
+                    return "⚪ Check"
+
+                df_recon['Status'] = df_recon.apply(get_status, axis=1)
+                df_recon['Remarks'] = df_recon.apply(lambda x: f"Type: {x['Return Type']}" if x['Return Type'] else "Standard", axis=1)
+
+                # --- DASHBOARD ---
+                
+                # Overview Metrics
+                st.markdown("### 📋 Financial Statement")
+                total_sales = df_recon['Invoice Value'].sum()
+                total_returns = df_recon['Return Value'].sum()
+                total_expected = total_sales - total_returns
+                total_rec = df_recon['Payment Received'].sum()
+                final_diff_total = df_recon['Final Difference'].sum()
+                rec_against_order = total_expected + final_diff_total
+
                 m1, m2, m3 = st.columns(3)
-                m1.metric("Total Sales", f"₹{df_recon['Invoice Value'].sum():,.0f}")
-                m2.metric("Returns", f"₹{df_recon['Return Value'].sum():,.0f}")
-                m3.metric("Net Pending", f"₹{df_recon['Final Difference'].sum():,.2f}")
+                m1.metric("1. Total Sales", f"₹{total_sales:,.0f}")
+                m2.metric("2. Less: Returns", f"₹{total_returns:,.0f}", delta_color="inverse")
+                m3.metric("3. Expected", f"₹{total_expected:,.0f}")
+                
+                st.divider()
+                
+                m4, m5, m6 = st.columns(3)
+                m4.metric("4. Received in Date Range", f"₹{total_rec:,.2f}")
+                m5.metric("5. Received Against Order & Return", f"₹{rec_against_order:,.2f}", delta="Adjusted Value")
+                m6.metric("6. Net Pending", f"₹{final_diff_total:,.2f}", 
+                        delta="Receivable" if final_diff_total > 0 else "Payable",
+                        delta_color="inverse" if final_diff_total > 0 else "normal")
 
-                st.markdown("### Detailed Report")
-                st.dataframe(df_recon, use_container_width=True)
+                st.divider()
+
+                # --- SETTLEMENT ANALYSIS (TABLE ONLY) ---
+                st.markdown("### 📅 Settlement Date-wise Analysis")
+                
+                if 'Settlement Date' in df_recon.columns and df_recon['Settlement Date'].notna().any():
+                    # Filter rows with valid settlement date
+                    df_settle = df_recon.dropna(subset=['Settlement Date']).copy()
+                    
+                    # CRITICAL FIX: Normalize Date (Remove Time)
+                    df_settle['Settlement Date'] = pd.to_datetime(df_settle['Settlement Date']).dt.date
+                    
+                    # Group by Date (Now consolidating properly)
+                    settle_group = df_settle.groupby('Settlement Date').agg({
+                        'Cust Order No': 'count',
+                        'Expected Payment': 'sum',
+                        'Payment Received': 'sum',
+                        'Final Difference': 'sum'
+                    }).reset_index()
+                    
+                    settle_group = settle_group.sort_values('Settlement Date')
+                    
+                    settle_group.columns = ['Settlement Date', 'Order Count', 'Total Expected (Value)', 'Total Received', 'Difference']
+                    
+                    # Display Table with formatted date (NO CHART)
+                    st.dataframe(
+                        settle_group,
+                        column_config={
+                            "Settlement Date": st.column_config.DateColumn("Settlement Date", format="DD-MMM-YYYY"),
+                            "Total Expected (Value)": st.column_config.NumberColumn("Expected Amt", format="₹%.2f"),
+                            "Total Received": st.column_config.NumberColumn("Received Amt", format="₹%.2f"),
+                            "Difference": st.column_config.NumberColumn("Diff", format="₹%.2f")
+                        },
+                        use_container_width=True,
+                        hide_index=True
+                    )
+                else:
+                    st.info("No Settlement Dates found in the Payment Report to generate timeline.")
+                
+                st.divider()
+
+                # --- TABS ---
+                tab_action, tab_settled, tab_all = st.tabs(["🚨 Action Required", "✅ Settled", "📄 All Data"])
+
+                column_config = {
+                    "Cust Order No": st.column_config.TextColumn("Order ID", width="medium"),
+                    "Invoice Date": st.column_config.DateColumn("Inv Date", format="DD-MMM-YYYY"),
+                    "Settlement Date": st.column_config.DateColumn("Settle Date", format="DD-MMM-YYYY"),
+                    "Invoice Value": st.column_config.NumberColumn("Sales", format="₹%.2f"),
+                    "Return Value": st.column_config.NumberColumn("Returns", format="₹%.2f"),
+                    "Payment Received": st.column_config.NumberColumn("Received", format="₹%.2f"),
+                    "Expected Payment": st.column_config.NumberColumn("Expected", format="₹%.2f"),
+                    "Final Difference": st.column_config.NumberColumn("Diff", format="₹%.2f"),
+                    "Status": st.column_config.TextColumn("Status", width="small"),
+                }
+                show_cols = ['Cust Order No', 'Invoice Date', 'Settlement Date', 'Invoice Value', 'Return Value', 'Expected Payment', 'Payment Received', 'Final Difference', 'Status', 'Remarks']
+
+                with tab_action:
+                    st.subheader("Disputed Orders")
+                    df_action = df_recon[df_recon['Status'].isin(["🔴 Not Received", "⚠️ Less Payment", "🔵 Over Payment"])]
+                    st.dataframe(df_action[show_cols], column_config=column_config, use_container_width=True, hide_index=True)
+
+                with tab_settled:
+                    st.subheader("Settled Orders")
+                    df_settled = df_recon[df_recon['Status'] == "🟢 Settled"]
+                    st.dataframe(df_settled[show_cols], column_config=column_config, use_container_width=True, hide_index=True)
+
+                with tab_all:
+                    st.subheader("All Data")
+                    search = st.text_input("Search Order ID:", placeholder="Type Order ID...")
+                    df_view = df_recon.copy()
+                    if search:
+                        df_view = df_view[df_view['Cust Order No'].str.contains(search, case=False)]
+                    st.dataframe(df_view[show_cols], column_config=column_config, use_container_width=True, hide_index=True)
+
+                st.markdown("---")
                 st.markdown(get_csv_download_link(df_recon), unsafe_allow_html=True)
 
             except Exception as e:
                 st.error(f"Processing Error: {e}")
-    else:
-        st.info("👈 Please upload Ajio GST, RTV, and Payment files in the sidebar.")
 
+    else:
+        st.info("👈 Upload GST, RTV, and Payment files in the sidebar.")
 
 # ==========================================
 # MASTER EXECUTION
