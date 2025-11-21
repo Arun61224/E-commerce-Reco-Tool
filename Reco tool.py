@@ -4,7 +4,7 @@ import numpy as np
 import io
 import zipfile
 import base64
-import plotly.express as px
+import xlsxwriter
 from datetime import datetime
 
 # --- 1. GLOBAL CONFIGURATION ---
@@ -16,7 +16,7 @@ tool_selection = st.sidebar.selectbox("Select Platform:", ["Amazon Reconciliatio
 st.sidebar.markdown("---")
 
 # ==========================================
-# MODULE 1: AMAZON RECONCILIATION LOGIC
+# MODULE 1: AMAZON RECONCILIATION LOGIC (FULL RESTORED)
 # ==========================================
 def run_amazon_tool():
     st.title("💰 Amazon Seller Central Reconciliation Dashboard")
@@ -235,10 +235,10 @@ def run_amazon_tool():
     # --- MAIN PAGE INPUTS (Amazon) ---
     st.subheader("Monthly Expenses (Manual Input)")
     c1, c2, c3, c4 = st.columns(4)
-    storage = c1.number_input("Storage Fee", value=0.0, step=100.0, key="amz_store")
-    ads = c2.number_input("Ads Spends", value=0.0, step=100.0, key="amz_ads")
-    salary = c3.number_input("Total Salary", value=0.0, step=1000.0, key="amz_sal")
-    misc = c4.number_input("Misc Expenses", value=0.0, step=100.0, key="amz_misc")
+    storage = c1.number_input("Storage Fee (INR)", value=0.0, step=100.0, key="amz_store")
+    ads = c2.number_input("Ads Spends (INR)", value=0.0, step=100.0, key="amz_ads")
+    salary = c3.number_input("Total Salary (INR)", value=0.0, step=1000.0, key="amz_sal")
+    misc = c4.number_input("Misc Expenses (INR)", value=0.0, step=100.0, key="amz_misc")
     st.markdown("---")
 
     # --- EXECUTION LOGIC ---
@@ -260,24 +260,107 @@ def run_amazon_tool():
             
             df_final = create_final_reconciliation_df(df_fin, df_log, df_cost)
             
-            # KPIs
-            total_profit_before = df_final['Product Profit/Loss'].sum()
-            total_exp = storage + ads + salary + misc
-            final_profit = total_profit_before - total_exp
+            if df_final.empty:
+                st.error("Reconciliation failed.")
+                st.stop()
+
+            # --- CALCULATIONS FOR DASHBOARD ---
+            total_items = df_final.shape[0]
+            total_mtr_billed = df_final['MTR Invoice Amount'].sum() if 'MTR Invoice Amount' in df_final.columns else 0
+            total_payment_fetched = df_final['Net Payment'].sum() if 'Net Payment' in df_final.columns else 0
+            total_fees = df_final['Total_Fees_KPI'].sum() if 'Total_Fees_KPI' in df_final.columns else 0
             
-            st.metric("TOTAL PROFIT/LOSS (Final)", f"INR {final_profit:,.2f}", delta=f"- Expenses: {total_exp:,.2f}")
+            if 'Product Cost' in df_final.columns and 'Quantity' in df_final.columns:
+                cost = pd.to_numeric(df_final['Product Cost'], errors='coerce').fillna(0)
+                quantity = pd.to_numeric(df_final['Quantity'], errors='coerce').fillna(1)
+                total_product_cost = (cost * quantity).sum()
+            else: total_product_cost = 0
+
+            total_profit_before_others = df_final['Product Profit/Loss'].sum() if 'Product Profit/Loss' in df_final.columns else 0
+            total_other_expenses = storage + ads + salary + misc
+            total_profit_final = total_profit_before_others - total_other_expenses
+
+            # --- DASHBOARD METRICS ---
+            st.subheader("Key Business Metrics")
+            k1, k2, k3, k4, k5, k6 = st.columns(6)
+            k1.metric("Total Items", f"{total_items:,}")
+            k2.metric("Net Payment", f"₹{total_payment_fetched:,.2f}")
+            k3.metric("MTR Invoiced", f"₹{total_mtr_billed:,.2f}")
+            k4.metric("Total Fees", f"₹{total_fees:,.2f}")
+            k5.metric("Product Cost", f"₹{total_product_cost:,.2f}")
+            k6.metric("PROFIT/LOSS", f"₹{total_profit_final:,.2f}", delta=f"Exp: ₹{total_other_expenses:,.2f}", delta_color="inverse")
+
+            st.markdown("**Monthly Expenses Breakdown:**")
+            e1, e2, e3, e4 = st.columns(4)
+            e1.metric("Storage", f"₹{storage:,.2f}")
+            e2.metric("Ads", f"₹{ads:,.2f}")
+            e3.metric("Salary", f"₹{salary:,.2f}")
+            e4.metric("Misc", f"₹{misc:,.2f}")
+            st.markdown("---")
+
+            # --- TABLE SECTION ---
+            st.header("1. Item-Level Reconciliation Summary")
             
-            st.subheader("Reconciliation Data")
-            st.dataframe(df_final, use_container_width=True)
+            if 'OrderID' in df_final.columns:
+                order_id_list = ['All Orders'] + sorted(df_final['OrderID'].unique().tolist())
+                selected_order_id = st.selectbox("👉 Filter by Order ID:", order_id_list)
+                if selected_order_id != 'All Orders':
+                    df_display = df_final[df_final['OrderID'] == selected_order_id].copy()
+                else:
+                    df_display = df_final.sort_values(by='OrderID', ascending=True).copy()
+            else:
+                df_display = df_final.copy()
+
+            # Formatting & Scaling
+            column_config_dict = {}
+            numeric_cols_to_format = [
+                'MTR Invoice Amount', 'Net Payment', 'Total_Commission_Fee',
+                'Total_Fixed_Closing_Fee', 'Total_FBA_Pick_Pack_Fee',
+                'Total_FBA_Weight_Handling_Fee', 'Total_Technology_Fee',
+                'Total_Fees_KPI', 'Total_Tax_TCS_TDS', 'Product Cost',
+                'Product Profit/Loss'
+            ]
+            # Scaling large numbers
+            large_num_threshold = 1e12 
+            scaling_factor = 1e18
+            cols_to_scale = ['Total_Commission_Fee', 'Total_Fees_KPI', 'Net Payment']
+
+            for col in cols_to_scale:
+                if col in df_display.columns:
+                    df_display[col] = pd.to_numeric(df_display[col], errors='coerce').fillna(0)
+                    df_display[col] = np.where(np.abs(df_display[col]) > large_num_threshold, df_display[col] / scaling_factor, df_display[col])
+
+            for col in numeric_cols_to_format:
+                if col in df_display.columns:
+                    column_config_dict[col] = st.column_config.NumberColumn(format="₹%.2f")
+
+            st.dataframe(df_display, column_config=column_config_dict, use_container_width=True, hide_index=True)
             
+            st.markdown("---")
             excel_data = convert_to_excel(df_final)
             st.download_button("Download Excel Report", data=excel_data, file_name='amazon_reconciliation.xlsx')
 
     else:
+        # No file uploaded - Show expenses state
+        total_other_expenses = storage + ads + salary + misc
+        total_profit_final = -total_other_expenses
+        
+        st.subheader("Current Other Expenses Input (No Sales Data)")
+        k_sum, k_exp = st.columns(2)
+        k_sum.metric("TOTAL PROFIT/LOSS (Expected)", f"₹{total_profit_final:,.2f}")
+        k_exp.metric("Total Expenses Input", f"₹{total_other_expenses:,.2f}")
+        
+        st.markdown("**Monthly Expenses Breakdown:**")
+        e1, e2, e3, e4 = st.columns(4)
+        e1.metric("Storage", f"₹{storage:,.2f}")
+        e2.metric("Ads", f"₹{ads:,.2f}")
+        e3.metric("Salary", f"₹{salary:,.2f}")
+        e4.metric("Misc", f"₹{misc:,.2f}")
+        st.markdown("---")
         st.info("Please upload Amazon Payment (Zip) and MTR (CSV) files in the sidebar.")
 
 # ==========================================
-# MODULE 2: AJIO RECONCILIATION LOGIC (Full Version)
+# MODULE 2: AJIO RECONCILIATION LOGIC (FULL RESTORED)
 # ==========================================
 def run_ajio_tool():
     # --- Custom CSS to Restore Look ---
