@@ -7,7 +7,7 @@ import base64
 import xlsxwriter
 from datetime import datetime
 
-# --- 1. GLOBAL CONFIGURATION ---
+# --- 1. GLOBAL CONFIGURATION (TOP LEVEL) ---
 st.set_page_config(layout="wide", page_title="E-commerce Reconciliation Master Tool")
 
 # --- SIDEBAR NAVIGATION ---
@@ -16,13 +16,10 @@ tool_selection = st.sidebar.selectbox("Select Platform:", ["Amazon Reconciliatio
 st.sidebar.markdown("---")
 
 # ==========================================
-# MODULE 1: AMAZON RECONCILIATION LOGIC (FULL RESTORED)
+# MODULE 1: AMAZON RECONCILIATION (ORIGINAL LOGIC RESTORED)
 # ==========================================
 def run_amazon_tool():
-    st.title("💰 Amazon Seller Central Reconciliation Dashboard")
-    st.markdown("---")
-
-    # --- HELPER FUNCTIONS FOR AMAZON ---
+    # --- HELPER FUNCTIONS (EXACT COPY FROM ORIGINAL) ---
     @st.cache_data
     def create_cost_sheet_template():
         template_data = {
@@ -35,10 +32,12 @@ def run_amazon_tool():
             df.to_excel(writer, sheet_name='Cost_Sheet_Template', index=False)
         return output.getvalue()
 
+    # Uncached function
     def process_cost_sheet(uploaded_file):
         required_cols = ['SKU', 'Product Cost']
         try:
             filename = uploaded_file.name.lower()
+            
             if filename.endswith(('.xlsx', '.xls')):
                 df_cost = pd.read_excel(uploaded_file)
             elif filename.endswith(('.csv')):
@@ -48,21 +47,24 @@ def run_amazon_tool():
                     df_cost = pd.read_csv(uploaded_file, encoding='latin-1')
                 uploaded_file.seek(0)
             else:
-                st.error(f"Error reading Cost Sheet: Unsupported file type.")
+                st.error(f"Error reading Cost Sheet ({uploaded_file.name}): Unsupported file type. Please upload .xlsx or .csv.")
                 return pd.DataFrame()
             
             df_cost.columns = [str(col).strip() for col in df_cost.columns]
             missing_cols = [col for col in required_cols if col not in df_cost.columns]
             if missing_cols:
-                st.error(f"Cost Sheet Error: Missing columns: {', '.join(missing_cols)}")
+                st.error(f"Cost Sheet Error: Missing required columns: {', '.join(missing_cols)}. Please check the file header.")
                 return pd.DataFrame()
             
             df_cost.rename(columns={'SKU': 'Sku'}, inplace=True)
             df_cost['Sku'] = df_cost['Sku'].astype(str)
             df_cost['Product Cost'] = pd.to_numeric(df_cost['Product Cost'], errors='coerce').fillna(0)
-            return df_cost.groupby('Sku')['Product Cost'].mean().reset_index(name='Product Cost')
+
+            df_cost_master = df_cost.groupby('Sku')['Product Cost'].mean().reset_index(name='Product Cost')
+
+            return df_cost_master
         except Exception as e:
-            st.error(f"Error reading Cost Sheet: {e}")
+            st.error(f"Error reading Cost Sheet ({uploaded_file.name}): Please ensure the file is correctly formatted with 'SKU' and 'Product Cost' columns. Details: {e}")
             return pd.DataFrame()
 
     @st.cache_data
@@ -81,6 +83,7 @@ def run_amazon_tool():
                 df_excel[col] = pd.to_numeric(df_excel[col], errors='coerce').fillna(0)
                 if col != 'Quantity':
                     df_excel[col] = df_excel[col].round(2)
+
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
             df_excel.to_excel(writer, sheet_name='Reconciliation_Summary', index=False)
         return output.getvalue()
@@ -88,14 +91,18 @@ def run_amazon_tool():
     def calculate_fee_total(df, keyword, name):
         if 'amount-description' not in df.columns:
             return pd.DataFrame({'OrderID': pd.Series(dtype='str'), name: pd.Series(dtype='float')})
+
         df_filtered = df.dropna(subset=['amount-description'])
         df_fee = df_filtered[df_filtered['amount-description'].astype(str).str.contains(keyword, case=False, na=False)]
+
         if df_fee.empty:
             return pd.DataFrame({'OrderID': pd.Series(dtype='str'), name: pd.Series(dtype='float')})
+
         df_summary = df_fee.groupby('OrderID')['amount'].sum().reset_index(name=name)
         df_summary[name] = df_summary[name].abs()
         return df_summary
 
+    # Uncached helper for ZIP processing
     def process_payment_zip_file(uploaded_zip_file):
         payment_files = []
         try:
@@ -103,6 +110,7 @@ def run_amazon_tool():
                 for name in zf.namelist():
                     if name.startswith('__MACOSX/') or name.endswith('/') or name.startswith('.'):
                         continue
+
                     if name.lower().endswith('.txt'):
                         file_content_bytes = zf.read(name)
                         pseudo_file = type('FileUploaderObject', (object,), {
@@ -111,14 +119,19 @@ def run_amazon_tool():
                             'read': lambda *args, b=file_content_bytes: b
                         })()
                         payment_files.append(pseudo_file)
+        except zipfile.BadZipFile:
+            st.error(f"Error: The uploaded file {uploaded_zip_file.name} is not a valid ZIP file.")
+            return []
         except Exception as e:
-            st.error(f"Error unzipping {uploaded_zip_file.name}: {e}")
+            st.error(f"An unexpected error occurred during unzipping {uploaded_zip_file.name}: {e}")
             return []
         return payment_files
 
+    # Uncached function
     def process_payment_files(uploaded_payment_files):
         all_payment_data = []
         required_cols_lower = ['order-id', 'amount-description', 'amount']
+
         for file in uploaded_payment_files:
             try:
                 file_content = None
@@ -127,203 +140,328 @@ def run_amazon_tool():
                 except UnicodeDecodeError:
                     try:
                         file_content = file.getvalue().decode("latin-1")
-                    except:
-                        continue
-                if file_content is None: continue
+                    except Exception as decode_err:
+                        st.error(f"Payment TXT Decode Error in {file.name}: Could not decode file content. Details: {decode_err}")
+                        continue 
                 
-                chunk_iter = pd.read_csv(io.StringIO(file_content), sep='\t', skipinitialspace=True, header=0, chunksize=100000)
+                if file_content is None:
+                    continue
+                
+                chunk_iter = pd.read_csv(
+                    io.StringIO(file_content),
+                    sep='\t',
+                    skipinitialspace=True,
+                    header=0,
+                    chunksize=100000
+                )
+
                 first_chunk = True
                 for chunk in chunk_iter:
                     chunk.columns = [str(col).strip().lower() for col in chunk.columns]
+
                     if first_chunk:
-                        if not all(col in chunk.columns for col in required_cols_lower):
-                            st.error(f"Missing columns in {file.name}")
+                        missing_cols = [col for col in required_cols_lower if col not in chunk.columns]
+                        if missing_cols:
+                            st.error(f"Error in {file.name}: The file is missing essential columns: {', '.join(missing_cols)}.")
                             return pd.DataFrame(), pd.DataFrame()
                         first_chunk = False
-                    if 'order-id' in chunk.columns: chunk.dropna(subset=['order-id'], inplace=True)
-                    else: continue
+
+                    if 'order-id' in chunk.columns:
+                        chunk.dropna(subset=['order-id'], inplace=True)
+                    else:
+                        continue
+
                     if all(col in chunk.columns for col in required_cols_lower):
-                        all_payment_data.append(chunk[required_cols_lower].copy())
-            except Exception: continue
+                        chunk_small = chunk[required_cols_lower].copy()
+                        all_payment_data.append(chunk_small)
 
-        if not all_payment_data: return pd.DataFrame(), pd.DataFrame()
-        df_charge = pd.concat(all_payment_data, ignore_index=True)
-        df_charge.rename(columns={'order-id': 'OrderID'}, inplace=True)
-        df_charge['OrderID'] = df_charge['OrderID'].astype(str)
-        df_charge['amount'] = pd.to_numeric(df_charge['amount'], errors='coerce').fillna(0)
-        
-        df_fin = df_charge.groupby('OrderID')['amount'].sum().reset_index(name='Net_Payment_Fetched')
-        
-        # Fees
-        df_comm = calculate_fee_total(df_charge, 'Commission', 'Total_Commission_Fee')
-        df_fixed = calculate_fee_total(df_charge, 'Fixed closing fee', 'Total_Fixed_Closing_Fee')
-        df_pick = calculate_fee_total(df_charge, 'Pick & Pack Fee', 'Total_FBA_Pick_Pack_Fee')
-        df_weight = calculate_fee_total(df_charge, 'Weight Handling Fee', 'Total_FBA_Weight_Handling_Fee')
-        df_tech = calculate_fee_total(df_charge, 'Technology Fee', 'Total_Technology_Fee')
-        df_tax = calculate_fee_total(df_charge, 'TCS|TDS|Tax', 'Total_Tax_TCS_TDS')
+            except Exception as e:
+                st.error(f"Error reading or processing chunks in {file.name} (Payment TXT): {e}")
+                return pd.DataFrame(), pd.DataFrame()
 
-        for df_f in [df_comm, df_fixed, df_pick, df_weight, df_tech, df_tax]:
-            if not df_f.empty: df_fin = pd.merge(df_fin, df_f, on='OrderID', how='left')
-        
-        df_fin.fillna(0, inplace=True)
-        fee_cols = ['Total_Commission_Fee', 'Total_Fixed_Closing_Fee', 'Total_FBA_Weight_Handling_Fee', 'Total_Technology_Fee']
-        df_fin['Total_Fees_KPI'] = df_fin[[c for c in fee_cols if c in df_fin.columns]].sum(axis=1)
-        
-        return df_fin, df_charge
+        if not all_payment_data:
+            st.error("No valid payment data was found or processed from the TXT files.")
+            return pd.DataFrame(), pd.DataFrame()
 
+        try:
+            df_charge_breakdown = pd.concat(all_payment_data, ignore_index=True)
+        except Exception as concat_err:
+            st.error(f"Error combining payment data chunks: {concat_err}")
+            return pd.DataFrame(), pd.DataFrame()
+
+        if df_charge_breakdown.empty:
+            st.error("Payment files were read, but no valid 'order-id' entries were found after processing.")
+            return pd.DataFrame(), pd.DataFrame()
+
+        df_charge_breakdown.rename(columns={'order-id': 'OrderID'}, inplace=True)
+        df_charge_breakdown['OrderID'] = df_charge_breakdown['OrderID'].astype(str)
+        df_charge_breakdown['amount'] = pd.to_numeric(df_charge_breakdown['amount'], errors='coerce').fillna(0)
+
+        df_financial_master = df_charge_breakdown.groupby('OrderID')['amount'].sum().reset_index(name='Net_Payment_Fetched')
+
+        # --- Fee Calculation ---
+        df_comm = calculate_fee_total(df_charge_breakdown, 'Commission', 'Total_Commission_Fee')
+        df_fixed = calculate_fee_total(df_charge_breakdown, 'Fixed closing fee', 'Total_Fixed_Closing_Fee')
+        df_pick = calculate_fee_total(df_charge_breakdown, 'Pick & Pack Fee', 'Total_FBA_Pick_Pack_Fee')
+        df_weight = calculate_fee_total(df_charge_breakdown, 'Weight Handling Fee', 'Total_FBA_Weight_Handling_Fee')
+        df_tech = calculate_fee_total(df_charge_breakdown, 'Technology Fee', 'Total_Technology_Fee')
+        tax_descriptions = ['TCS', 'TDS', 'Tax']
+        df_tax_summary = calculate_fee_total(df_charge_breakdown, '|'.join(tax_descriptions), 'Total_Tax_TCS_TDS')
+
+        for df_fee in [df_comm, df_fixed, df_pick, df_weight, df_tech, df_tax_summary]:
+            if not df_fee.empty and 'OrderID' in df_fee.columns:
+                df_financial_master = pd.merge(df_financial_master, df_fee, on='OrderID', how='left')
+            else:
+                # Add missing columns
+                col_name = df_fee.columns[1] if len(df_fee.columns) > 1 else 'Unknown'
+                if col_name != 'Unknown' and col_name not in df_financial_master.columns:
+                    df_financial_master[col_name] = 0.0
+
+        df_financial_master.fillna(0, inplace=True)
+
+        fee_kpi_cols = ['Total_Commission_Fee', 'Total_Fixed_Closing_Fee', 'Total_FBA_Weight_Handling_Fee', 'Total_Technology_Fee']
+        df_financial_master['Total_Fees_KPI'] = df_financial_master[[col for col in fee_kpi_cols if col in df_financial_master.columns]].sum(axis=1)
+        
+        return df_financial_master, df_charge_breakdown
+
+    # Uncached function
     def process_mtr_files(uploaded_mtr_files):
-        all_mtr = []
-        req_cols = ['Invoice Number', 'Invoice Date', 'Transaction Type', 'Order Id', 'Quantity', 'Sku', 'Invoice Amount']
+        all_mtr_data = []
+        required_mtr_cols = [
+            'Invoice Number', 'Invoice Date', 'Transaction Type', 'Order Id',
+            'Quantity', 'Sku', 'Ship From City', 'Ship To City', 'Ship To State',
+            'Invoice Amount'
+        ]
+
         for file in uploaded_mtr_files:
             try:
                 chunk_iter = pd.read_csv(file, chunksize=100000)
                 for chunk in chunk_iter:
+                    chunk = chunk.loc[:, ~chunk.columns.str.contains('^Unnamed')]
                     chunk.columns = [str(col).strip() for col in chunk.columns]
-                    cols = [c for c in req_cols if c in chunk.columns]
-                    if cols: all_mtr.append(chunk[cols].copy())
-            except: return pd.DataFrame()
-        
-        if not all_mtr: return pd.DataFrame()
-        df_mtr = pd.concat(all_mtr, ignore_index=True)
-        df_mtr.rename(columns={'Order Id': 'OrderID', 'Invoice Amount': 'MTR Invoice Amount'}, inplace=True)
-        df_mtr['OrderID'] = df_mtr['OrderID'].astype(str)
-        df_mtr['MTR Invoice Amount'] = pd.to_numeric(df_mtr['MTR Invoice Amount'], errors='coerce').fillna(0)
-        df_mtr['Sku'] = df_mtr['Sku'].astype(str)
-        df_mtr['Quantity'] = pd.to_numeric(df_mtr['Quantity'], errors='coerce').fillna(1).astype(int)
-        return df_mtr
 
-    @st.cache_data(show_spinner="Merging...")
-    def create_final_reconciliation_df(df_fin, df_log, df_cost):
-        if df_log.empty or df_fin.empty: return pd.DataFrame()
-        df_final = pd.merge(df_log, df_fin, on='OrderID', how='left')
+                    cols_to_keep = [col for col in required_mtr_cols if col in chunk.columns]
+                    if cols_to_keep:
+                        chunk_small = chunk[cols_to_keep].copy()
+                        all_mtr_data.append(chunk_small)
+                    else:
+                        st.error(f"MTR Error in {file.name}: Could not find essential columns.")
+                        return pd.DataFrame()
+            except Exception as e:
+                st.error(f"Error reading {file.name} (MTR CSV): {e}")
+                return pd.DataFrame()
+
+        if not all_mtr_data:
+            st.error("No valid MTR data could be processed from the CSV files.")
+            return pd.DataFrame()
+
+        try:
+            df_mtr_raw = pd.concat(all_mtr_data, ignore_index=True)
+        except Exception as concat_err:
+            st.error(f"Error combining MTR data chunks: {concat_err}")
+            return pd.DataFrame()
+
+        df_mtr_raw.rename(columns={'Order Id': 'OrderID', 'Invoice Amount': 'MTR Invoice Amount'}, inplace=True)
         
-        # Calculations
+        final_cols = ['Invoice Number', 'Invoice Date', 'Transaction Type', 'OrderID', 'Quantity', 'Sku', 'Ship From City', 'Ship To City', 'Ship To State', 'MTR Invoice Amount']
+        for col in final_cols:
+            if col not in df_mtr_raw.columns:
+                df_mtr_raw[col] = ''
+
+        df_logistics_master = df_mtr_raw[final_cols].copy()
+        df_logistics_master['OrderID'] = df_logistics_master['OrderID'].astype(str)
+        df_logistics_master['MTR Invoice Amount'] = pd.to_numeric(df_logistics_master['MTR Invoice Amount'], errors='coerce').fillna(0)
+        df_logistics_master['Sku'] = df_logistics_master['Sku'].astype(str)
+        df_logistics_master['Quantity'] = pd.to_numeric(df_logistics_master['Quantity'], errors='coerce').fillna(1).astype(int)
+
+        return df_logistics_master
+
+    @st.cache_data(show_spinner="Merging data and finalizing calculations...")
+    def create_final_reconciliation_df(df_financial_master, df_logistics_master, df_cost_master):
+        if df_logistics_master.empty or df_financial_master.empty:
+            return pd.DataFrame()
+
+        try:
+            df_final = pd.merge(df_logistics_master, df_financial_master, on='OrderID', how='left')
+        except Exception as merge_err:
+            st.error(f"Error during main merge: {merge_err}")
+            return pd.DataFrame()
+
+        numeric_cols_needed = ['MTR Invoice Amount', 'Net_Payment_Fetched', 'Quantity']
+        for col in numeric_cols_needed:
+            if col not in df_final.columns: df_final[col] = 0
+            df_final[col] = pd.to_numeric(df_final[col], errors='coerce').fillna(0)
+
         df_final['Total_MTR_per_Order'] = df_final.groupby('OrderID')['MTR Invoice Amount'].transform('sum')
-        df_final['Item_Count'] = df_final.groupby('OrderID')['OrderID'].transform('count')
-        df_final['Proportion'] = np.where(df_final['Total_MTR_per_Order']!=0, df_final['MTR Invoice Amount']/df_final['Total_MTR_per_Order'], 1/df_final['Item_Count'])
-        
-        fin_cols = [c for c in df_fin.columns if c != 'OrderID' and c in df_final.columns]
-        for c in fin_cols: df_final[c] = pd.to_numeric(df_final[c], errors='coerce').fillna(0) * df_final['Proportion']
+        df_final['Item_Count_per_Order'] = df_final.groupby('OrderID')['OrderID'].transform('count')
+        df_final['Proportion'] = np.where(
+            (df_final['Total_MTR_per_Order'] != 0),
+            df_final['MTR Invoice Amount'] / df_final['Total_MTR_per_Order'],
+            np.where(df_final['Item_Count_per_Order'] > 0, 1 / df_final['Item_Count_per_Order'], 0)
+        )
 
-        if 'Net_Payment_Fetched' in df_final.columns: df_final.rename(columns={'Net_Payment_Fetched': 'Net Payment'}, inplace=True)
+        financial_cols_present = [col for col in df_financial_master.columns if col != 'OrderID' and col in df_final.columns]
+        for col in financial_cols_present:
+            df_final[col] = pd.to_numeric(df_final[col], errors='coerce').fillna(0) * df_final['Proportion']
+
+        if 'Net_Payment_Fetched' in df_final.columns:
+            df_final.rename(columns={'Net_Payment_Fetched': 'Net Payment'}, inplace=True)
+        elif 'Net Payment' not in df_final.columns:
+            df_final['Net Payment'] = 0.0
+
+        if not df_cost_master.empty and 'Sku' in df_final.columns and 'Sku' in df_cost_master.columns:
+            try:
+                df_final = pd.merge(df_final, df_cost_master, on='Sku', how='left')
+            except Exception:
+                pass
         
-        if not df_cost.empty:
-            df_final = pd.merge(df_final, df_cost, on='Sku', how='left')
-        if 'Product Cost' not in df_final.columns: df_final['Product Cost'] = 0.0
-        
-        # Refund/Cancel Logic
-        trans_type = df_final['Transaction Type'].astype(str).str.strip().str.lower() if 'Transaction Type' in df_final.columns else pd.Series()
-        conditions = [trans_type.isin(['refund', 'freereplacement']), trans_type.str.contains('cancel', na=False)]
-        choices = [-0.5 * df_final['Product Cost'], -0.8 * df_final['Product Cost']]
-        df_final['Product Cost'] = np.select(conditions, choices, default=df_final['Product Cost'])
-        
-        df_final['Product Profit/Loss'] = df_final['Net Payment'] - (df_final['Product Cost'] * df_final['Quantity'])
+        if 'Product Cost' not in df_final.columns:
+            df_final['Product Cost'] = 0.0
+
+        df_final.fillna(0, inplace=True)
+        df_final['Product Cost'] = pd.to_numeric(df_final['Product Cost'], errors='coerce').fillna(0)
+
+        refund_keywords = ['refund', 'freereplacement']
+        cancel_keywords = ['cancel']
+
+        if 'Transaction Type' in df_final.columns:
+            standardized_transaction_type = df_final['Transaction Type'].astype(str).str.strip().str.lower()
+            conditions = [
+                standardized_transaction_type.isin(refund_keywords),
+                standardized_transaction_type.str.contains('|'.join(cancel_keywords), na=False) 
+            ]
+            choices = [-0.5 * df_final['Product Cost'], -0.8 * df_final['Product Cost']]
+            df_final['Product Cost'] = np.select(conditions, choices, default=df_final['Product Cost'])
+
+        df_final['Net Payment'] = pd.to_numeric(df_final['Net Payment'], errors='coerce').fillna(0)
+        df_final['Quantity'] = pd.to_numeric(df_final['Quantity'], errors='coerce').fillna(1).astype(int)
+        df_final['Product Profit/Loss'] = (df_final['Net Payment'] - (df_final['Product Cost'] * df_final['Quantity']))
+
         return df_final
 
-    # --- AMAZON SIDEBAR INPUTS ---
-    st.sidebar.subheader("Amazon Uploads")
-    
-    # Template Download
-    excel_template = create_cost_sheet_template()
-    st.sidebar.download_button("Download Cost Template 📥", data=excel_template, file_name='cost_sheet_template.xlsx')
-    
-    cost_file = st.sidebar.file_uploader("1. Product Cost Sheet (.xlsx/.csv)", type=['xlsx', 'csv'], key="amz_cost")
-    st.sidebar.markdown("---")
-    payment_zip_files = st.sidebar.file_uploader("2. Payment Reports (.zip)", type=['zip'], accept_multiple_files=True, key="amz_zip")
-    mtr_files = st.sidebar.file_uploader("3. MTR Reports (.csv)", type=['csv'], accept_multiple_files=True, key="amz_mtr")
-
-    # --- MAIN PAGE INPUTS (Amazon) ---
-    st.subheader("Monthly Expenses (Manual Input)")
-    c1, c2, c3, c4 = st.columns(4)
-    storage = c1.number_input("Storage Fee (INR)", value=0.0, step=100.0, key="amz_store")
-    ads = c2.number_input("Ads Spends (INR)", value=0.0, step=100.0, key="amz_ads")
-    salary = c3.number_input("Total Salary (INR)", value=0.0, step=1000.0, key="amz_sal")
-    misc = c4.number_input("Misc Expenses (INR)", value=0.0, step=100.0, key="amz_misc")
+    # --- AMAZON UI & LOGIC START ---
+    st.title("💰 Amazon Seller Central Reconciliation Dashboard (Detailed)")
     st.markdown("---")
 
-    # --- EXECUTION LOGIC ---
+    # Sidebar Inputs (Restored with unique keys)
+    st.sidebar.subheader("Amazon Uploads")
+    excel_template = create_cost_sheet_template()
+    st.sidebar.download_button("Download Cost Template 📥", data=excel_template, file_name='cost_sheet_template.xlsx', mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
+    cost_file = st.sidebar.file_uploader("1. Upload Product Cost Sheet (.xlsx or .csv)", type=['xlsx', 'csv'], key='amz_cost')
+    st.sidebar.markdown("---")
+    payment_zip_files = st.sidebar.file_uploader("2. Upload ALL Payment Reports (.zip)", type=['zip'], accept_multiple_files=True, key='amz_zip')
+    mtr_files = st.sidebar.file_uploader("3. Upload ALL MTR Reports (.csv)", type=['csv'], accept_multiple_files=True, key='amz_mtr')
+
+    # Main Page Inputs
+    st.subheader("Monthly Expenses (Mandatory Inputs)")
+    col_exp_input1, col_exp_input2 = st.columns(2)
+    col_exp_input3, col_exp_input4 = st.columns(2)
+
+    with col_exp_input1:
+        storage_fee = st.number_input("Monthly Storage Fee (INR)", min_value=0.0, value=0.0, step=100.0, key='amz_storage')
+    with col_exp_input2:
+        ads_spends = st.number_input("Monthly Advertising Spends (INR)", min_value=0.0, value=0.0, step=100.0, key='amz_ads')
+    with col_exp_input3:
+        total_salary = st.number_input("Total Salary (INR)", min_value=0.0, value=0.0, step=1000.0, key='amz_salary')
+    with col_exp_input4:
+        miscellaneous_expenses = st.number_input("Miscellaneous Expenses (INR)", min_value=0.0, value=0.0, step=100.0, key='amz_misc')
+    st.markdown("---")
+
     if payment_zip_files and mtr_files:
-        df_cost = process_cost_sheet(cost_file) if cost_file else pd.DataFrame()
-        
-        all_zips = []
-        for z in payment_zip_files: all_zips.extend(process_payment_zip_file(z))
-        
-        if not all_zips: st.stop()
-        
-        with st.spinner("Processing Amazon Data..."):
-            df_fin, _ = process_payment_files(all_zips)
-            df_log = process_mtr_files(mtr_files)
-            
-            if df_fin.empty or df_log.empty:
-                st.error("Data processing failed.")
-                st.stop()
-            
-            df_final = create_final_reconciliation_df(df_fin, df_log, df_cost)
-            
-            if df_final.empty:
-                st.error("Reconciliation failed.")
+        df_cost_master = pd.DataFrame()
+        if cost_file:
+            with st.spinner("Processing Cost Sheet..."):
+                df_cost_master = process_cost_sheet(cost_file)
+            if df_cost_master.empty and cost_file:
                 st.stop()
 
-            # --- CALCULATIONS FOR DASHBOARD ---
-            total_items = df_final.shape[0]
-            total_mtr_billed = df_final['MTR Invoice Amount'].sum() if 'MTR Invoice Amount' in df_final.columns else 0
-            total_payment_fetched = df_final['Net Payment'].sum() if 'Net Payment' in df_final.columns else 0
-            total_fees = df_final['Total_Fees_KPI'].sum() if 'Total_Fees_KPI' in df_final.columns else 0
+        all_payment_file_objects = []
+        with st.spinner("Unzipping Payment files..."):
+            for zip_file in payment_zip_files:
+                all_payment_file_objects.extend(process_payment_zip_file(zip_file))
+
+        if not all_payment_file_objects:
+            st.error("ZIP file(s) processed, but no Payment (.txt) files found.")
+            st.stop()
+
+        with st.spinner("Processing Payment files..."):
+            df_financial_master, _ = process_payment_files(all_payment_file_objects)
+            if df_financial_master.empty: st.stop()
+
+        with st.spinner("Processing MTR files..."):
+            df_logistics_master = process_mtr_files(mtr_files)
+            if df_logistics_master.empty: st.stop()
+
+        if not df_financial_master.empty and not df_logistics_master.empty:
+            df_reconciliation = create_final_reconciliation_df(df_financial_master, df_logistics_master, df_cost_master)
+        else:
+            st.error("Data processing failed.")
+            st.stop()
+
+        if df_reconciliation.empty:
+            st.error("Failed to create reconciliation report.")
+            st.stop()
+
+        excel_data = None
+        try:
+            excel_data = convert_to_excel(df_reconciliation)
+        except Exception:
+            excel_data = io.BytesIO(b"Error")
+
+        # --- DASHBOARD DISPLAY ---
+        try:
+            total_items = df_reconciliation.shape[0]
+            total_mtr_billed = df_reconciliation['MTR Invoice Amount'].sum() if 'MTR Invoice Amount' in df_reconciliation.columns else 0
+            total_payment_fetched = df_reconciliation['Net Payment'].sum() if 'Net Payment' in df_reconciliation.columns else 0
+            total_fees = df_reconciliation['Total_Fees_KPI'].sum() if 'Total_Fees_KPI' in df_reconciliation.columns else 0
             
-            if 'Product Cost' in df_final.columns and 'Quantity' in df_final.columns:
-                cost = pd.to_numeric(df_final['Product Cost'], errors='coerce').fillna(0)
-                quantity = pd.to_numeric(df_final['Quantity'], errors='coerce').fillna(1)
+            if 'Product Cost' in df_reconciliation.columns and 'Quantity' in df_reconciliation.columns:
+                cost = pd.to_numeric(df_reconciliation['Product Cost'], errors='coerce').fillna(0)
+                quantity = pd.to_numeric(df_reconciliation['Quantity'], errors='coerce').fillna(1)
                 total_product_cost = (cost * quantity).sum()
             else: total_product_cost = 0
 
-            total_profit_before_others = df_final['Product Profit/Loss'].sum() if 'Product Profit/Loss' in df_final.columns else 0
-            total_other_expenses = storage + ads + salary + misc
+            total_profit_before_others = df_reconciliation['Product Profit/Loss'].sum() if 'Product Profit/Loss' in df_reconciliation.columns else 0
+            total_other_expenses = storage_fee + ads_spends + total_salary + miscellaneous_expenses 
             total_profit_final = total_profit_before_others - total_other_expenses
 
-            # --- DASHBOARD METRICS ---
-            st.subheader("Key Business Metrics")
-            k1, k2, k3, k4, k5, k6 = st.columns(6)
-            k1.metric("Total Items", f"{total_items:,}")
-            k2.metric("Net Payment", f"₹{total_payment_fetched:,.2f}")
-            k3.metric("MTR Invoiced", f"₹{total_mtr_billed:,.2f}")
-            k4.metric("Total Fees", f"₹{total_fees:,.2f}")
-            k5.metric("Product Cost", f"₹{total_product_cost:,.2f}")
-            k6.metric("PROFIT/LOSS", f"₹{total_profit_final:,.2f}", delta=f"Exp: ₹{total_other_expenses:,.2f}", delta_color="inverse")
-
+            st.subheader("Key Business Metrics (Based on Item Reconciliation)")
+            col_kpi1, col_kpi2, col_kpi3, col_kpi4, col_kpi5, col_kpi6 = st.columns(6)
+            
+            col_kpi1.metric("Total Items", f"{total_items:,}")
+            col_kpi2.metric("Total Net Payment", f"₹{total_payment_fetched:,.2f}")
+            col_kpi3.metric("Total MTR Invoiced", f"₹{total_mtr_billed:,.2f}")
+            col_kpi4.metric("Total Amazon Fees", f"₹{total_fees:.2f}")
+            col_kpi5.metric("Total Product Cost", f"₹{total_product_cost:,.2f}")
+            col_kpi6.metric("TOTAL PROFIT/LOSS (Final)", f"₹{total_profit_final:,.2f}", delta=f"Exp: ₹{total_other_expenses:,.2f}", delta_color="inverse")
+            
             st.markdown("**Monthly Expenses Breakdown:**")
-            e1, e2, e3, e4 = st.columns(4)
-            e1.metric("Storage", f"₹{storage:,.2f}")
-            e2.metric("Ads", f"₹{ads:,.2f}")
-            e3.metric("Salary", f"₹{salary:,.2f}")
-            e4.metric("Misc", f"₹{misc:,.2f}")
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Storage", f"₹{storage_fee:,.2f}")
+            c2.metric("Ads", f"₹{ads_spends:,.2f}")
+            c3.metric("Salary", f"₹{total_salary:,.2f}")
+            c4.metric("Misc", f"₹{miscellaneous_expenses:,.2f}")
             st.markdown("---")
 
-            # --- TABLE SECTION ---
-            st.header("1. Item-Level Reconciliation Summary")
+            st.header("1. Item-Level Reconciliation Summary (MTR Details + Classified Charges)")
             
-            if 'OrderID' in df_final.columns:
-                order_id_list = ['All Orders'] + sorted(df_final['OrderID'].unique().tolist())
-                selected_order_id = st.selectbox("👉 Filter by Order ID:", order_id_list)
+            if 'OrderID' in df_reconciliation.columns:
+                order_id_list = ['All Orders'] + sorted(df_reconciliation['OrderID'].unique().tolist())
+                selected_order_id = st.selectbox("👉 Select Order ID to Filter Summary:", order_id_list)
                 if selected_order_id != 'All Orders':
-                    df_display = df_final[df_final['OrderID'] == selected_order_id].copy()
+                    df_display = df_reconciliation[df_reconciliation['OrderID'] == selected_order_id].copy()
                 else:
-                    df_display = df_final.sort_values(by='OrderID', ascending=True).copy()
+                    df_display = df_reconciliation.sort_values(by='OrderID', ascending=True).copy()
             else:
-                df_display = df_final.copy()
+                df_display = df_reconciliation.copy()
 
-            # Formatting & Scaling
             column_config_dict = {}
-            numeric_cols_to_format = [
-                'MTR Invoice Amount', 'Net Payment', 'Total_Commission_Fee',
-                'Total_Fixed_Closing_Fee', 'Total_FBA_Pick_Pack_Fee',
-                'Total_FBA_Weight_Handling_Fee', 'Total_Technology_Fee',
-                'Total_Fees_KPI', 'Total_Tax_TCS_TDS', 'Product Cost',
-                'Product Profit/Loss'
-            ]
-            # Scaling large numbers
-            large_num_threshold = 1e12 
+            numeric_cols_to_format = ['MTR Invoice Amount', 'Net Payment', 'Total_Commission_Fee', 'Total_Fixed_Closing_Fee', 'Total_FBA_Pick_Pack_Fee', 'Total_FBA_Weight_Handling_Fee', 'Total_Technology_Fee', 'Total_Fees_KPI', 'Total_Tax_TCS_TDS', 'Product Cost', 'Product Profit/Loss']
+            
+            cols_to_scale = ['Total_Commission_Fee', 'Total_Fixed_Closing_Fee', 'Total_FBA_Pick_Pack_Fee', 'Total_FBA_Weight_Handling_Fee', 'Total_Technology_Fee', 'Total_Fees_KPI', 'Total_Tax_TCS_TDS', 'Net Payment']
+            large_num_threshold = 1e12
             scaling_factor = 1e18
-            cols_to_scale = ['Total_Commission_Fee', 'Total_Fees_KPI', 'Net Payment']
 
             for col in cols_to_scale:
                 if col in df_display.columns:
@@ -335,35 +473,27 @@ def run_amazon_tool():
                     column_config_dict[col] = st.column_config.NumberColumn(format="₹%.2f")
 
             st.dataframe(df_display, column_config=column_config_dict, use_container_width=True, hide_index=True)
-            
             st.markdown("---")
-            excel_data = convert_to_excel(df_final)
-            st.download_button("Download Excel Report", data=excel_data, file_name='amazon_reconciliation.xlsx')
+            st.header("2. Download Full Reconciliation Report")
+            if excel_data:
+                st.download_button(label="Download Full Excel Report", data=excel_data, file_name='amazon_reconciliation_summary.xlsx', mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
+        except Exception as display_err:
+            st.error(f"Dashboard Error: {display_err}")
 
     else:
-        # No file uploaded - Show expenses state
-        total_other_expenses = storage + ads + salary + misc
-        total_profit_final = -total_other_expenses
-        
+        # State when no files are uploaded
+        total_other = storage_fee + ads_spends + total_salary + miscellaneous_expenses
         st.subheader("Current Other Expenses Input (No Sales Data)")
         k_sum, k_exp = st.columns(2)
-        k_sum.metric("TOTAL PROFIT/LOSS (Expected)", f"₹{total_profit_final:,.2f}")
-        k_exp.metric("Total Expenses Input", f"₹{total_other_expenses:,.2f}")
-        
-        st.markdown("**Monthly Expenses Breakdown:**")
-        e1, e2, e3, e4 = st.columns(4)
-        e1.metric("Storage", f"₹{storage:,.2f}")
-        e2.metric("Ads", f"₹{ads:,.2f}")
-        e3.metric("Salary", f"₹{salary:,.2f}")
-        e4.metric("Misc", f"₹{misc:,.2f}")
-        st.markdown("---")
-        st.info("Please upload Amazon Payment (Zip) and MTR (CSV) files in the sidebar.")
+        k_sum.metric("TOTAL PROFIT/LOSS (Expected)", f"₹{-total_other:,.2f}")
+        k_exp.metric("Total Expenses Input", f"₹{total_other:,.2f}")
+        st.info("Please upload files in the sidebar.")
 
 # ==========================================
-# MODULE 2: AJIO RECONCILIATION LOGIC (FULL RESTORED)
+# MODULE 2: AJIO RECONCILIATION (DETAILED VERSION)
 # ==========================================
 def run_ajio_tool():
-    # --- Custom CSS to Restore Look ---
     st.markdown("""
         <style>
         div[data-testid="stMetric"] {
