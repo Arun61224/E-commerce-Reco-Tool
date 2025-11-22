@@ -226,8 +226,9 @@ def amz_create_final_reconciliation_df(df_fin, df_log, df_cost):
     df_final.loc[is_refund, 'Quantity'] = -1 * df_final.loc[is_refund, 'Quantity'].abs()
     
     # 2. Adjust Cost Logic
+    # Cancel now adjusted to -0.2 (20%) instead of -0.8 (80%)
     conditions = [is_refund, is_cancel]
-    choices = [0.5 * df_final['Product Cost'], -0.8 * df_final['Product Cost']]
+    choices = [0.5 * df_final['Product Cost'], -0.2 * df_final['Product Cost']]
     df_final['Product Cost'] = np.select(conditions, choices, default=df_final['Product Cost'])
     
     # Final Clean before Calc
