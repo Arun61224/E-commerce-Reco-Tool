@@ -13,7 +13,6 @@ st.set_page_config(layout="wide", page_title="E-commerce Reconciliation Master T
 # --- 2. GLOBAL HELPER FUNCTIONS (AMAZON) ---
 @st.cache_data
 def amz_create_cost_sheet_template():
-    """Generates an Excel template for product cost sheet."""
     template_data = {
         'SKU': ['ExampleSKU-001', 'ExampleSKU-002'],
         'Product Cost': [150.50, 220.00]
@@ -25,7 +24,6 @@ def amz_create_cost_sheet_template():
     return output.getvalue()
 
 def amz_process_cost_sheet(uploaded_file):
-    """Reads and validates the uploaded cost sheet."""
     required_cols = ['SKU', 'Product Cost']
     try:
         filename = uploaded_file.name.lower()
@@ -38,415 +36,552 @@ def amz_process_cost_sheet(uploaded_file):
                 df_cost = pd.read_csv(uploaded_file, encoding='latin-1')
             uploaded_file.seek(0)
         else:
-            st.error("Invalid file format for Cost Sheet. Please upload Excel (.xlsx, .xls) or CSV (.csv) files.")
-            return None
-
-        # Standardize column names
-        df_cost.columns = df_cost.columns.str.strip().str.replace(' ', '_')
-        df_cost = df_cost[['SKU', 'Product_Cost']].copy()
-        df_cost.rename(columns={'Product_Cost': 'Product Cost'}, inplace=True)
-
-        if not all(col in df_cost.columns for col in required_cols):
-            st.error(f"Cost Sheet missing required columns: {required_cols}")
-            return None
-
-        df_cost['SKU'] = df_cost['SKU'].astype(str).str.strip().str.upper()
-        df_cost['Product Cost'] = pd.to_numeric(df_cost['Product Cost'], errors='coerce')
-        df_cost.dropna(subset=['SKU', 'Product Cost'], inplace=True)
-        df_cost = df_cost.drop_duplicates(subset=['SKU'])
-
-        if df_cost.empty:
-            st.error("Cost Sheet is empty or contains no valid data.")
-            return None
-
-        st.success(f"Cost Sheet loaded with {len(df_cost)} unique SKUs.")
-        return df_cost
-
+            st.error(f"Error reading Cost Sheet: Unsupported file type.")
+            return pd.DataFrame()
+        
+        df_cost.columns = [str(col).strip() for col in df_cost.columns]
+        missing_cols = [col for col in required_cols if col not in df_cost.columns]
+        if missing_cols:
+            st.error(f"Cost Sheet Error: Missing columns: {', '.join(missing_cols)}")
+            return pd.DataFrame()
+        
+        df_cost.rename(columns={'SKU': 'Sku'}, inplace=True)
+        df_cost['Sku'] = df_cost['Sku'].astype(str)
+        df_cost['Product Cost'] = pd.to_numeric(df_cost['Product Cost'], errors='coerce').fillna(0)
+        return df_cost.groupby('Sku')['Product Cost'].mean().reset_index(name='Product Cost')
     except Exception as e:
-        st.error(f"Error reading or processing Cost Sheet: {e}")
-        return None
+        st.error(f"Error reading Cost Sheet: {e}")
+        return pd.DataFrame()
 
 @st.cache_data
-def amz_process_settlement_report(uploaded_file):
-    """Reads and preprocesses the Amazon Settlement Report."""
-    try:
-        df_settlement = pd.read_csv(uploaded_file, compression='zip', encoding='latin-1')
-    except zipfile.BadZipFile:
-        st.error("Error: This does not appear to be a valid ZIP file. Please upload the compressed (.zip) file directly from Amazon.")
-        return None
-    except Exception as e:
-        st.error(f"Error reading Settlement Report: {e}")
-        return None
-
-    # Rename columns for clarity and consistency
-    col_mapping = {
-        'transaction-type': 'Transaction Type',
-        'settlement-id': 'Settlement ID',
-        'settlement-start-date': 'Settlement Start Date',
-        'settlement-end-date': 'Settlement End Date',
-        'deposit-date': 'Deposit Date',
-        'order-id': 'Order ID',
-        'sku': 'SKU',
-        'marketplace-name': 'Marketplace',
-        'amount-type': 'Amount Type',
-        'amount-description': 'Amount Description',
-        'amount': 'Amount',
-        'fulfillment-id': 'Fulfillment ID'
-    }
-
-    df_settlement.columns = [col.lower() for col in df_settlement.columns]
-    df_settlement.rename(columns=col_mapping, inplace=True)
-
-    required_cols = ['Transaction Type', 'Order ID', 'SKU', 'Amount Type', 'Amount Description', 'Amount']
-    if not all(col in df_settlement.columns for col in required_cols):
-        st.error(f"Settlement Report missing required columns: {required_cols}")
-        return None
-
-    # Preprocessing
-    df_settlement['SKU'] = df_settlement['SKU'].astype(str).str.strip().str.upper()
-    df_settlement['Amount'] = pd.to_numeric(df_settlement['Amount'], errors='coerce').fillna(0)
-
-    st.success(f"Settlement Report loaded with {len(df_settlement)} transactions.")
-    return df_settlement
-
-@st.cache_data
-def amz_reconcile_sales(df_settlement, df_cost):
-    """Performs the core Amazon reconciliation logic."""
-    df_sales = df_settlement[df_settlement['Transaction Type'] == 'Order'].copy()
-
-    # Calculate Total Sale Amount and Total Commission/Fee per Order ID
-    df_sales_pivot = df_sales.pivot_table(
-        index=['Order ID', 'SKU'],
-        columns=['Amount Type', 'Amount Description'],
-        values='Amount',
-        aggfunc='sum'
-    ).fillna(0).reset_index()
-
-    # Flatten column names for easier access
-    df_sales_pivot.columns = [' '.join(col).strip() if col[0] else col[1] for col in df_sales_pivot.columns.values]
-    
-    # Identify relevant columns (these might vary slightly, so we check for presence)
-    
-    # Sales/Revenue
-    revenue_cols = [c for c in df_sales_pivot.columns if 'item-price principal' in c.lower()]
-    df_sales_pivot['Sales Value'] = df_sales_pivot[revenue_cols].sum(axis=1) if revenue_cols else 0
-
-    # Commissions/Referral Fee
-    comm_cols = [c for c in df_sales_pivot.columns if 'fee referral fee' in c.lower()]
-    df_sales_pivot['Commission'] = df_sales_pivot[comm_cols].sum(axis=1) if comm_cols else 0
-
-    # FBA Fees (if applicable)
-    fba_cols = [c for c in df_sales_pivot.columns if 'fee fba' in c.lower()]
-    df_sales_pivot['FBA Fee'] = df_sales_pivot[fba_cols].sum(axis=1) if fba_cols else 0
-    
-    # Fixed Closing Fee (if applicable)
-    fixed_cols = [c for c in df_sales_pivot.columns if 'fee fixed closing fee' in c.lower()]
-    df_sales_pivot['Fixed Closing Fee'] = df_sales_pivot[fixed_cols].sum(axis=1) if fixed_cols else 0
-    
-    # Shipping Charges collected from customer
-    shipping_collected_cols = [c for c in df_sales_pivot.columns if 'item-price shipping' in c.lower()]
-    df_sales_pivot['Shipping Collected'] = df_sales_pivot[shipping_collected_cols].sum(axis=1) if shipping_collected_cols else 0
-
-    # Final Reconciliation Columns
-    df_sales_recon = df_sales_pivot[['Order ID', 'SKU', 'Sales Value', 'Commission', 'FBA Fee', 'Fixed Closing Fee', 'Shipping Collected']].copy()
-    
-    # Merge with Cost Sheet
-    df_sales_recon = pd.merge(df_sales_recon, df_cost, on='SKU', how='left')
-    df_sales_recon['Product Cost'] = df_sales_recon['Product Cost'].fillna(0) # Assume 0 cost if SKU not found
-
-    # Calculate Net Realization
-    df_sales_recon['Total Fees'] = df_sales_recon['Commission'] + df_sales_recon['FBA Fee'] + df_sales_recon['Fixed Closing Fee']
-    
-    # The 'Amount' in the report is typically the net total credited/debited for that specific transaction line.
-    # For a simple reconciliation, we'll calculate the expected payout based on the extracted components.
-
-    # Expected Payout = Sales Value + Shipping Collected - Total Fees - Product Cost (for P&L view)
-    df_sales_recon['Expected Realization'] = df_sales_recon['Sales Value'] + df_sales_recon['Shipping Collected'] + df_sales_recon['Total Fees'] 
-    
-    # We need the actual total amount credited for the order to compare.
-    # Group the original settlement report by Order ID and sum the 'Amount' for 'Order' transactions
-    df_actual_payout = df_sales[df_sales['Transaction Type'] == 'Order'].groupby('Order ID')['Amount'].sum().reset_index()
-    df_actual_payout.rename(columns={'Amount': 'Actual Payment Received'}, inplace=True)
-    
-    # Merge actual payment back (assuming one product per order for simplicity, otherwise this needs more complex mapping)
-    # Since pivot already grouped by SKU and Order ID, we need the total order amount.
-    
-    # Re-group the original settlement report for the *total* paid out per order ID (all transaction types related to the order)
-    df_total_order_payout = df_settlement.groupby('Order ID')['Amount'].sum().reset_index()
-    df_total_order_payout.rename(columns={'Amount': 'Actual Total Payout'}, inplace=True)
-    
-    df_recon = pd.merge(df_sales_recon, df_total_order_payout, on='Order ID', how='left')
-    
-    # Calculate expected final net realization (Sales + Shipping - Fees)
-    df_recon['Expected Payment'] = df_recon['Sales Value'] + df_recon['Shipping Collected'] + df_recon['Total Fees']
-    
-    # Rename for clarity
-    df_recon.rename(columns={'Actual Total Payout': 'Actual Payment Received'}, inplace=True)
-    
-    # Calculate Difference
-    df_recon['Final Difference'] = df_recon['Actual Payment Received'] - df_recon['Expected Payment']
-    
-    # Determine Status
-    df_recon['Status'] = '🟢 Settled'
-    df_recon.loc[df_recon['Final Difference'] < -0.5, 'Status'] = '⚠️ Less Payment'
-    df_recon.loc[df_recon['Final Difference'] > 0.5, 'Status'] = '🔵 Over Payment'
-    df_recon.loc[df_recon['Actual Payment Received'] == 0, 'Status'] = '🔴 Not Received'
-
-    return df_recon
-
-
-def amz_get_csv_download_link(df):
-    """Generates a downloadable link for the reconciliation data."""
+def amz_convert_to_excel(df):
     output = io.BytesIO()
+    df_excel = df.copy()
+    numeric_cols = [
+        'MTR Invoice Amount', 'Net Payment', 'Total_Commission_Fee',
+        'Total_Fixed_Closing_Fee', 'Total_FBA_Pick_Pack_Fee',
+        'Total_FBA_Weight_Handling_Fee', 'Total_Technology_Fee',
+        'Total_Fees_KPI', 'Total_Tax_TCS_TDS', 'Product Cost',
+        'Product Profit/Loss', 'Quantity'
+    ]
+    for col in numeric_cols:
+        if col in df_excel.columns:
+            df_excel[col] = pd.to_numeric(df_excel[col], errors='coerce').fillna(0)
+            if col != 'Quantity':
+                df_excel[col] = df_excel[col].round(2)
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df.to_excel(writer, sheet_name='Amazon Reconciliation', index=False)
-    
-    b64 = base64.b64encode(output.getvalue()).decode()
-    href = f'<a href="data:application/octet-stream;base64,{b64}" download="Amazon_Reconciliation_{datetime.now().strftime("%Y%m%d_%H%M%S")}.xlsx">📥 Download Reconciliation Excel File</a>'
-    return href
+        df_excel.to_excel(writer, sheet_name='Reconciliation_Summary', index=False)
+    return output.getvalue()
 
-# --- 3. AMAZON RECONCILIATION UI/LOGIC ---
-def amazon_reconciliation_tool():
-    """Main function for Amazon Reconciliation UI."""
-    st.header("Amazon Reconciliation Tool (Settlement Report)")
-    st.info("Upload the Amazon Settlement Report (Zipped CSV) and your Product Cost Sheet (Excel/CSV).")
+def amz_calculate_fee_total(df, keyword, name):
+    if 'amount-description' not in df.columns:
+        return pd.DataFrame({'OrderID': pd.Series(dtype='str'), name: pd.Series(dtype='float')})
+    df_filtered = df.dropna(subset=['amount-description'])
+    df_fee = df_filtered[df_filtered['amount-description'].astype(str).str.contains(keyword, case=False, na=False)]
+    if df_fee.empty:
+        return pd.DataFrame({'OrderID': pd.Series(dtype='str'), name: pd.Series(dtype='float')})
+    df_summary = df_fee.groupby('OrderID')['amount'].sum().reset_index(name=name)
+    df_summary[name] = df_summary[name].abs()
+    return df_summary
 
-    # Template Download
-    st.download_button(
-        label="Download Cost Sheet Template (Excel)",
-        data=amz_create_cost_sheet_template(),
-        file_name='Amazon_Cost_Sheet_Template.xlsx',
-        mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-    )
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        amz_settlement_file = st.file_uploader("Upload Amazon Settlement Report (ZIPPED .csv)", type=['zip'], key='amz_settlement')
-    with col2:
-        amz_cost_file = st.file_uploader("Upload Product Cost Sheet (.xlsx or .csv)", type=['xlsx', 'xls', 'csv'], key='amz_cost')
-
-    if amz_settlement_file and amz_cost_file:
-        df_settlement = amz_process_settlement_report(amz_settlement_file)
-        df_cost = amz_process_cost_sheet(amz_cost_file)
-
-        if df_settlement is not None and df_cost is not None:
-            st.markdown("---")
-            st.subheader("Reconciliation Summary")
-
-            try:
-                # Perform reconciliation
-                df_recon = amz_reconcile_sales(df_settlement, df_cost)
-
-                # Summary Metrics
-                total_orders = df_recon['Order ID'].nunique()
-                total_settled = df_recon[df_recon['Status']=='🟢 Settled']['Order ID'].nunique()
-                total_less_payment = df_recon[df_recon['Status']=='⚠️ Less Payment']['Order ID'].nunique()
-                total_not_received = df_recon[df_recon['Status']=='🔴 Not Received']['Order ID'].nunique()
-                
-                col_m1, col_m2, col_m3, col_m4 = st.columns(4)
-                col_m1.metric("Total Order Lines", len(df_recon))
-                col_m2.metric("Settled Orders (🟢)", total_settled)
-                col_m3.metric("Less/Not Received (🔴+⚠️)", total_less_payment + total_not_received, delta=f"Total Diff: ₹{df_recon['Final Difference'].sum():.2f}")
-                col_m4.metric("Total Sales Value", f"₹{df_recon['Sales Value'].sum():.2f}")
-                
-                st.markdown("---")
-                st.subheader("Reconciliation Details")
-
-                t1, t2, t3 = st.tabs(["Issues (🔴/⚠️/🔵)", "Settled (🟢)", "Full Data"])
-                
-                final_cols = ['Status', 'Order ID', 'SKU', 'Sales Value', 'Commission', 'FBA Fee', 'Fixed Closing Fee', 'Expected Payment', 'Actual Payment Received', 'Final Difference', 'Product Cost']
-                
-                col_config = {
-                    "Status": st.column_config.TextColumn("Status"),
-                    "Order ID": "Order ID",
-                    "SKU": "SKU",
-                    "Sales Value": st.column_config.NumberColumn("Sale Value", format="₹%.2f"),
-                    "Commission": st.column_config.NumberColumn("Comm", format="₹%.2f"),
-                    "FBA Fee": st.column_config.NumberColumn("FBA Fee", format="₹%.2f"),
-                    "Fixed Closing Fee": st.column_config.NumberColumn("Fixed Fee", format="₹%.2f"),
-                    "Product Cost": st.column_config.NumberColumn("Cost", format="₹%.2f"),
-                    "Expected Payment": st.column_config.NumberColumn("Expected", format="₹%.2f"),
-                    "Actual Payment Received": st.column_config.NumberColumn("Received", format="₹%.2f"),
-                    "Final Difference": st.column_config.NumberColumn("Diff", format="₹%.2f"),
-                }
-
-
-                with t1: st.dataframe(df_recon[df_recon['Status'].isin(["🔴 Not Received", "⚠️ Less Payment", "🔵 Over Payment"])][final_cols], column_config=col_config, use_container_width=True, hide_index=True)
-                with t2: st.dataframe(df_recon[df_recon['Status']=="🟢 Settled"][final_cols], column_config=col_config, use_container_width=True, hide_index=True)
-                with t3: st.dataframe(df_recon[final_cols], column_config=col_config, use_container_width=True, hide_index=True)
-
-                st.markdown(amz_get_csv_download_link(df_recon), unsafe_allow_html=True)
-
-            except Exception as e:
-                st.error(f"Error during reconciliation: {e}")
-                st.exception(e) # Show full traceback for debugging
-    else:
-        st.info("Upload files to begin reconciliation.")
-
-# --- 4. GLOBAL HELPER FUNCTIONS (AJIO) ---
-@st.cache_data
-def ajio_process_ajio_report(uploaded_file):
-    """Reads and preprocesses the Ajio report."""
+def amz_process_payment_zip_file(uploaded_zip_file):
+    payment_files = []
     try:
-        filename = uploaded_file.name.lower()
-        if filename.endswith(('.xlsx', '.xls')):
-            df = pd.read_excel(uploaded_file)
-        elif filename.endswith(('.csv')):
+        with zipfile.ZipFile(uploaded_zip_file, 'r') as zf:
+            for name in zf.namelist():
+                if name.startswith('__MACOSX/') or name.endswith('/') or name.startswith('.'):
+                    continue
+                if name.lower().endswith('.txt'):
+                    file_content_bytes = zf.read(name)
+                    pseudo_file = type('FileUploaderObject', (object,), {
+                        'name': name,
+                        'getvalue': lambda *args, b=file_content_bytes: b,
+                        'read': lambda *args, b=file_content_bytes: b
+                    })()
+                    payment_files.append(pseudo_file)
+    except Exception as e:
+        st.error(f"Error unzipping {uploaded_zip_file.name}: {e}")
+        return []
+    return payment_files
+
+def amz_process_payment_files(uploaded_payment_files):
+    all_payment_data = []
+    required_cols_lower = ['order-id', 'amount-description', 'amount']
+    for file in uploaded_payment_files:
+        try:
+            file_content = None
             try:
-                df = pd.read_csv(uploaded_file, encoding='utf-8')
+                file_content = file.getvalue().decode("utf-8")
             except UnicodeDecodeError:
-                df = pd.read_csv(uploaded_file, encoding='latin-1')
-            uploaded_file.seek(0)
-        else:
-            st.error("Invalid file format for Ajio Report. Please upload Excel (.xlsx, .xls) or CSV (.csv) files.")
-            return None
-    except Exception as e:
-        st.error(f"Error reading Ajio Report: {e}")
-        return None
-
-    # Standardize and select required columns
-    df.columns = df.columns.str.strip().str.replace('[^A-Za-z0-9]+', '_', regex=True)
-    
-    # Expected Ajio columns based on common reports
-    col_mapping = {
-        'Order_ID': 'Order ID',
-        'SKU_Code': 'SKU',
-        'Invoice_Amount': 'Invoice Amount',
-        'Payment_Received': 'Payment Received',
-        'Total_Return_Value': 'Return Value',
-        'Commission_Amount': 'Commission',
-        'GST_on_Commission': 'GST on Commission',
-        'Shipping_Charges': 'Shipping Fee',
-        'GST_on_Shipping_Charges': 'GST on Shipping Fee',
-        # Add more mappings if needed based on the user's specific Ajio file
-    }
-    
-    # Try to find common columns even if the header names are slightly different
-    df.rename(columns=lambda x: col_mapping.get(x, x), inplace=True)
-    
-    # Define required core columns for reconciliation
-    required_core_cols = ['Order ID', 'SKU', 'Invoice Amount', 'Payment Received']
-    
-    if not all(col in df.columns for col in required_core_cols):
-        missing = [col for col in required_core_cols if col not in df.columns]
-        st.error(f"Ajio Report missing required columns: {missing}. Please check column headers.")
-        return None
-
-    # Convert essential columns to numeric, coercion to handle non-numeric data gracefully
-    for col in ['Invoice Amount', 'Payment Received']:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+                try:
+                    file_content = file.getvalue().decode("latin-1")
+                except:
+                    continue
+            if file_content is None: continue
             
-    # Handle optional columns, assume 0 if missing
-    df['Return Value'] = pd.to_numeric(df.get('Return Value', 0), errors='coerce').fillna(0)
-    df['Commission'] = pd.to_numeric(df.get('Commission', 0), errors='coerce').fillna(0)
-    df['GST on Commission'] = pd.to_numeric(df.get('GST on Commission', 0), errors='coerce').fillna(0)
-    df['Shipping Fee'] = pd.to_numeric(df.get('Shipping Fee', 0), errors='coerce').fillna(0)
-    df['GST on Shipping Fee'] = pd.to_numeric(df.get('GST on Shipping Fee', 0), errors='coerce').fillna(0)
-    
-    df['SKU'] = df['SKU'].astype(str).str.strip()
-    df.dropna(subset=['Order ID', 'SKU'], inplace=True)
-    
-    st.success(f"Ajio Report loaded with {len(df)} transactions.")
-    return df
+            chunk_iter = pd.read_csv(io.StringIO(file_content), sep='\t', skipinitialspace=True, header=0, chunksize=100000)
+            first_chunk = True
+            for chunk in chunk_iter:
+                chunk.columns = [str(col).strip().lower() for col in chunk.columns]
+                if first_chunk:
+                    if not all(col in chunk.columns for col in required_cols_lower):
+                        st.error(f"Missing columns in {file.name}")
+                        return pd.DataFrame(), pd.DataFrame()
+                    first_chunk = False
+                if 'order-id' in chunk.columns: chunk.dropna(subset=['order-id'], inplace=True)
+                else: continue
+                if all(col in chunk.columns for col in required_cols_lower):
+                    all_payment_data.append(chunk[required_cols_lower].copy())
+        except Exception: continue
 
-@st.cache_data
-def ajio_reconcile_sales(df_ajio):
-    """Performs the core Ajio reconciliation logic."""
-    df_recon = df_ajio.copy()
+    if not all_payment_data: return pd.DataFrame(), pd.DataFrame()
+    df_charge = pd.concat(all_payment_data, ignore_index=True)
+    df_charge.rename(columns={'order-id': 'OrderID'}, inplace=True)
+    df_charge['OrderID'] = df_charge['OrderID'].astype(str)
+    df_charge['amount'] = pd.to_numeric(df_charge['amount'], errors='coerce').fillna(0)
     
-    # Ajio reports typically show the final amount received, but we need to calculate
-    # the expected payment based on the invoice value and deductions.
+    df_fin = df_charge.groupby('OrderID')['amount'].sum().reset_index(name='Net_Payment_Fetched')
     
-    # Total deductions (Fees + GST on Fees + Returns)
-    df_recon['Total Deductions'] = (
-        df_recon['Return Value'].abs() + 
-        df_recon['Commission'].abs() + 
-        df_recon['GST on Commission'].abs() + 
-        df_recon['Shipping Fee'].abs() + 
-        df_recon['GST on Shipping Fee'].abs()
+    # Fees
+    df_comm = amz_calculate_fee_total(df_charge, 'Commission', 'Total_Commission_Fee')
+    df_fixed = amz_calculate_fee_total(df_charge, 'Fixed closing fee', 'Total_Fixed_Closing_Fee')
+    df_pick = amz_calculate_fee_total(df_charge, 'Pick & Pack Fee', 'Total_FBA_Pick_Pack_Fee')
+    df_weight = amz_calculate_fee_total(df_charge, 'Weight Handling Fee', 'Total_FBA_Weight_Handling_Fee')
+    df_tech = amz_calculate_fee_total(df_charge, 'Technology Fee', 'Total_Technology_Fee')
+    df_tax = amz_calculate_fee_total(df_charge, 'TCS|TDS|Tax', 'Total_Tax_TCS_TDS')
+
+    for df_f in [df_comm, df_fixed, df_pick, df_weight, df_tech, df_tax]:
+        if not df_f.empty: df_fin = pd.merge(df_fin, df_f, on='OrderID', how='left')
+    
+    df_fin.fillna(0, inplace=True)
+    fee_cols = ['Total_Commission_Fee', 'Total_Fixed_Closing_Fee', 'Total_FBA_Weight_Handling_Fee', 'Total_Technology_Fee']
+    df_fin['Total_Fees_KPI'] = df_fin[[c for c in fee_cols if c in df_fin.columns]].sum(axis=1)
+    
+    return df_fin, df_charge
+
+def amz_process_mtr_files(uploaded_mtr_files):
+    all_mtr = []
+    req_cols = ['Invoice Number', 'Invoice Date', 'Transaction Type', 'Order Id', 'Quantity', 'Sku', 'Invoice Amount']
+    for file in uploaded_mtr_files:
+        try:
+            chunk_iter = pd.read_csv(file, chunksize=100000)
+            for chunk in chunk_iter:
+                chunk.columns = [str(col).strip() for col in chunk.columns]
+                cols = [c for c in req_cols if c in chunk.columns]
+                if cols: all_mtr.append(chunk[cols].copy())
+        except: return pd.DataFrame()
+    
+    if not all_mtr: return pd.DataFrame()
+    df_mtr = pd.concat(all_mtr, ignore_index=True)
+    df_mtr.rename(columns={'Order Id': 'OrderID', 'Invoice Amount': 'MTR Invoice Amount'}, inplace=True)
+    df_mtr['OrderID'] = df_mtr['OrderID'].astype(str)
+    df_mtr['MTR Invoice Amount'] = pd.to_numeric(df_mtr['MTR Invoice Amount'], errors='coerce').fillna(0)
+    df_mtr['Sku'] = df_mtr['Sku'].astype(str)
+    df_mtr['Quantity'] = pd.to_numeric(df_mtr['Quantity'], errors='coerce').fillna(1).astype(int)
+    return df_mtr
+
+@st.cache_data(show_spinner="Merging...")
+def amz_create_final_reconciliation_df(df_fin, df_log, df_cost):
+    if df_log.empty or df_fin.empty: return pd.DataFrame()
+    
+    # --- 1. FILTER LOGIC: REMOVE CANCEL TRANSACTIONS THAT ALSO APPEAR AS SHIPMENTS ---
+    
+    # Identify valid Shipment Order IDs (Set A)
+    valid_shipment_orders = set(
+        df_log[df_log['Transaction Type'].astype(str).str.lower() == 'shipment']['OrderID'].unique()
     )
     
-    # Expected Payment = Invoice Amount - Total Deductions
-    # NOTE: Ajio's Payment Received should ideally match this.
-    df_recon['Expected Payment'] = df_recon['Invoice Amount'] - df_recon['Total Deductions']
+    # Filter df_log to apply the custom logic
+    df_log['TransType_Lower'] = df_log['Transaction Type'].astype(str).str.lower()
     
-    # Calculate Difference
-    df_recon['Final Difference'] = df_recon['Payment Received'] - df_recon['Expected Payment']
+    # Check 1: Is the row a 'Cancel' transaction?
+    is_cancel_row = df_log['TransType_Lower'].str.contains('cancel', na=False)
     
-    # Determine Status
-    df_recon['Status'] = '🟢 Settled'
-    df_recon.loc[df_recon['Final Difference'] < -0.5, 'Status'] = '⚠️ Less Payment'
-    df_recon.loc[df_recon['Final Difference'] > 0.5, 'Status'] = '🔵 Over Payment'
-    df_recon.loc[df_recon['Payment Received'] == 0, 'Status'] = '🔴 Not Received'
+    # Check 2: Does this OrderID also exist in the 'Shipment' set?
+    is_in_shipment = df_log['OrderID'].isin(valid_shipment_orders)
     
-    return df_recon
-
-
-def ajio_get_csv_download_link(df):
-    """Generates a downloadable link for the reconciliation data."""
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df.to_excel(writer, sheet_name='Ajio Reconciliation', index=False)
+    # The condition for removal: is a Cancel AND exists as a Shipment.
+    should_be_removed = (is_cancel_row) & (is_in_shipment)
     
-    b64 = base64.b64encode(output.getvalue()).decode()
-    href = f'<a href="data:application/octet-stream;base64,{b64}" download="Ajio_Reconciliation_{datetime.now().strftime("%Y%m%d_%H%M%S")}.xlsx">📥 Download Reconciliation Excel File</a>'
-    return href
+    # Remove the rows that satisfy the removal condition.
+    df_log = df_log[~should_be_removed].copy()
+    df_log.drop(columns=['TransType_Lower'], inplace=True)
+    # ------------------------------------------------------------------------------------
 
-# --- 5. AJIO RECONCILIATION UI/LOGIC ---
-def ajio_reconciliation_tool():
-    """Main function for Ajio Reconciliation UI."""
-    st.header("Ajio Reconciliation Tool")
-    st.info("Upload the Ajio Order/Settlement Report (Excel/CSV).")
+    # --- 2. Merge Logic with Indicator ---
+    try:
+        df_final = pd.merge(df_log, df_fin, on='OrderID', how='left', indicator='_merge_status')
+    except: return pd.DataFrame()
+    
+    # Remarks
+    df_final['Remarks'] = np.where(df_final['_merge_status'] == 'left_only', 'Order ID is not in this Payment report', '')
+    df_final.drop(columns=['_merge_status'], inplace=True)
+    
+    # Calculations
+    df_final['Total_MTR_per_Order'] = df_final.groupby('OrderID')['MTR Invoice Amount'].transform('sum')
+    df_final['Item_Count'] = df_final.groupby('OrderID')['OrderID'].transform('count')
+    df_final['Proportion'] = np.where(df_final['Total_MTR_per_Order']!=0, df_final['MTR Invoice Amount']/df_final['Total_MTR_per_Order'], 1/df_final['Item_Count'])
+    
+    fin_cols = [c for c in df_fin.columns if c != 'OrderID' and c in df_final.columns]
+    for c in fin_cols: df_final[c] = pd.to_numeric(df_final[c], errors='coerce').fillna(0) * df_final['Proportion']
 
-    ajio_report_file = st.file_uploader("Upload Ajio Report (.xlsx or .csv)", type=['xlsx', 'xls', 'csv'], key='ajio_report')
+    if 'Net_Payment_Fetched' in df_final.columns: df_final.rename(columns={'Net_Payment_Fetched': 'Net Payment'}, inplace=True)
+    
+    # Cost Merge
+    if not df_cost.empty:
+        try:
+            df_final = pd.merge(df_final, df_cost, on='Sku', how='left')
+        except: pass
+    
+    if 'Product Cost' not in df_final.columns: df_final['Product Cost'] = 0.0
+    
+    # --- 3. DATA CLEANUP ---
+    df_final.fillna(0, inplace=True) 
+    df_final['Product Cost'] = pd.to_numeric(df_final['Product Cost'], errors='coerce').fillna(0)
+    df_final['Quantity'] = pd.to_numeric(df_final['Quantity'], errors='coerce').fillna(1).astype(int)
+    
+    # --- 4. REFUND/CANCEL/FREEREPLACEMENT COST LOGIC ---
+    trans_type = df_final['Transaction Type'].astype(str).str.strip().str.lower() if 'Transaction Type' in df_final.columns else pd.Series()
+    
+    is_refund = trans_type.isin(['refund'])
+    is_cancel = trans_type.str.contains('cancel', na=False)
+    is_freereplacement = trans_type.isin(['freereplacement']) # New condition for FreeReplacement
+    
+    # 1. Make Quantity Negative ONLY for Refunds
+    df_final.loc[is_refund, 'Quantity'] = -1 * df_final.loc[is_refund, 'Quantity'].abs()
+    
+    # 2. Adjust Cost Logic based on transaction type
+    conditions = [
+        is_freereplacement,  # FreeReplacement: Product Cost = 0
+        is_refund,           # Refund: Product Cost = 50%
+        is_cancel            # Cancel: Product Cost = -20% (Negative 20% of original cost)
+    ]
+    choices = [
+        0,                                   # For FreeReplacement
+        0.5 * df_final['Product Cost'],      # For Refund
+        -0.2 * df_final['Product Cost']      # For Cancel
+    ]
+    
+    # Apply cost adjustment. Default value is the original Product Cost (for 'Shipment' etc.)
+    df_final['Product Cost'] = np.select(conditions, choices, default=df_final['Product Cost'])
+    
+    # Final Clean before Calc
+    df_final['Net Payment'] = pd.to_numeric(df_final['Net Payment'], errors='coerce').fillna(0)
+    
+    # Profit Calculation
+    df_final['Product Profit/Loss'] = df_final['Net Payment'] - (df_final['Product Cost'] * df_final['Quantity'])
+    return df_final
 
-    if ajio_report_file:
-        df_ajio = ajio_process_ajio_report(ajio_report_file)
+# --- 3. GLOBAL HELPER FUNCTIONS (AJIO) ---
+def ajio_get_csv_download_link(df, filename="reconciliation_report.csv"):
+    csv = df.to_csv(index=False)
+    b64 = base64.b64encode(csv.encode()).decode()
+    return f'<a href="data:file/csv;base64,{b64}" download="{filename}" style="text-decoration:none; background-color:#FF4B4B; color:white; padding:10px 20px; border-radius:5px; font-weight:bold;">📥 Download Reconciliation Report</a>'
 
-        if df_ajio is not None:
+def ajio_clean_currency(x):
+    if isinstance(x, str):
+        val = x.replace('₹', '').replace(',', '').strip()
+        return float(val) if val else 0.0
+    try: return float(x)
+    except: return 0.0
+
+def ajio_parse_date(date_str):
+    if not isinstance(date_str, str) or not date_str.strip(): return None 
+    clean_str = date_str.replace(" IST", "").strip()
+    try: return datetime.strptime(clean_str, "%a %b %d %H:%M:%S %Y")
+    except ValueError:
+        try: return pd.to_datetime(date_str)
+        except: return None
+
+def ajio_get_first_val(series):
+    valid = series.dropna()
+    valid = valid[valid != '']
+    return valid.iloc[0] if not valid.empty else None
+
+def ajio_find_col(df, candidates):
+    col_map = {c.lower().strip(): c for c in df.columns}
+    for cand in candidates:
+        if cand.lower().strip() in col_map: return col_map[cand.lower().strip()]
+    return None
+
+def ajio_clean_order_id(series):
+    s = series.astype(str).str.replace(r'\.0$', '', regex=True)
+    return s.str.strip().str.upper().replace(['NAN', 'NULL', 'NONE', '0', '', 'NAT'], np.nan)
+
+
+# ==========================================
+# MODULE 3: AMAZON EXECUTION
+# ==========================================
+def run_amazon_tool():
+    st.title("💰 Amazon Seller Central Reconciliation Dashboard")
+    st.markdown("---")
+
+    # Sidebar
+    st.sidebar.subheader("Amazon Uploads")
+    excel_template = amz_create_cost_sheet_template()
+    st.sidebar.download_button("Download Cost Template 📥", data=excel_template, file_name='cost_sheet_template.xlsx')
+    
+    cost_file = st.sidebar.file_uploader("1. Product Cost Sheet (.xlsx/.csv)", type=['xlsx', 'csv'], key="amz_cost")
+    st.sidebar.markdown("---")
+    payment_zip_files = st.sidebar.file_uploader("2. Payment Reports (.zip)", type=['zip'], accept_multiple_files=True, key="amz_zip")
+    mtr_files = st.sidebar.file_uploader("3. MTR Reports (.csv)", type=['csv'], accept_multiple_files=True, key="amz_mtr")
+
+    # Main Page Inputs
+    st.subheader("Monthly Expenses (Manual Input)") 
+    c1, c2, c3, c4 = st.columns(4)
+    storage = c1.number_input("Monthly Storage Fee (INR)", value=0.0, step=100.0, key="amz_store")
+    ads = c2.number_input("Monthly Advertising Spends (INR)", value=0.0, step=100.0, key="amz_ads")
+    salary = c3.number_input("Total Salary (INR)", value=0.0, step=1000.0, key="amz_sal")
+    misc = c4.number_input("Miscellaneous Expenses (INR)", value=0.0, step=100.0, key="amz_misc")
+    
+    if payment_zip_files and mtr_files:
+        st.markdown("---")
+        df_cost = amz_process_cost_sheet(cost_file) if cost_file else pd.DataFrame()
+        
+        all_zips = []
+        for z in payment_zip_files: all_zips.extend(amz_process_payment_zip_file(z))
+        
+        if not all_zips: st.stop()
+        
+        with st.spinner("Processing Amazon Data..."):
+            df_fin, _ = amz_process_payment_files(all_zips)
+            df_log = amz_process_mtr_files(mtr_files)
+            
+            if df_fin.empty or df_log.empty:
+                st.error("Data processing failed.")
+                st.stop()
+            
+            df_final = amz_create_final_reconciliation_df(df_fin, df_log, df_cost)
+            
+            # KPIs
+            total_items = df_final.shape[0]
+            total_mtr = df_final['MTR Invoice Amount'].sum()
+            total_pay = df_final['Net Payment'].sum()
+            total_fees = df_final['Total_Fees_KPI'].sum()
+            total_cost = (df_final['Product Cost'] * df_final['Quantity']).sum()
+            
+            profit_before_exp = df_final['Product Profit/Loss'].sum()
+            total_exp = storage + ads + salary + misc
+            final_profit = profit_before_exp - total_exp
+            
+            st.subheader("Key Business Metrics (Based on Item Reconciliation)")
+            k1, k2, k3, k4, k5, k6 = st.columns(6)
+            k1.metric("Total Items", f"{total_items:,}")
+            k2.metric("Total Net Payment", f"INR {total_pay:,.2f}")
+            k3.metric("Total MTR Invoiced", f"INR {total_mtr:,.2f}")
+            k4.metric("Total Amazon Fees", f"INR {total_fees:,.2f}")
+            k5.metric("Total Product Cost", f"INR {total_cost:,.2f}")
+            
+            k6.metric("TOTAL PROFIT/LOSS (Final)", f"INR {final_profit:,.2f}", delta=f"Other Expenses: INR {total_exp:,.2f}")
+            
+            st.markdown("**Monthly Expenses Breakdown:**")
+            e1, e2, e3, e4 = st.columns(4)
+            e1.metric("Storage Fee", f"INR {storage:,.2f}")
+            e2.metric("Ads Spends", f"INR {ads:,.2f}")
+            e3.metric("Total Salary", f"INR {salary:,.2f}")
+            e4.metric("Miscellaneous Expenses", f"INR {misc:,.2f}")
             st.markdown("---")
-            st.subheader("Reconciliation Summary")
 
+            # Table
+            st.header("1. Item-Level Reconciliation Summary (MTR Details + Classified Charges)")
+            if 'OrderID' in df_final.columns:
+                oids = ['All Orders'] + sorted(df_final['OrderID'].unique().tolist())
+                sel_oid = st.selectbox("👉 Select Order ID to Filter Summary:", oids)
+                if sel_oid != 'All Orders':
+                    df_disp = df_final[df_final['OrderID'] == sel_oid].copy()
+                else:
+                    df_disp = df_final.sort_values('OrderID').copy()
+            else: df_disp = df_final.copy()
+
+            # Format
+            num_cols = ['MTR Invoice Amount', 'Net Payment', 'Total_Commission_Fee', 'Total_Fixed_Closing_Fee', 'Total_FBA_Pick_Pack_Fee', 'Total_FBA_Weight_Handling_Fee', 'Total_Technology_Fee', 'Total_Fees_KPI', 'Total_Tax_TCS_TDS', 'Product Cost', 'Product Profit/Loss']
+            col_conf = {c: st.column_config.NumberColumn(format="INR %.2f") for c in num_cols}
+            
+            if 'Remarks' in df_disp.columns:
+                col_conf['Remarks'] = st.column_config.TextColumn("Status/Remarks", help="Checks if order is found in Payment Report")
+
+            st.dataframe(df_disp, column_config=col_conf, use_container_width=True, hide_index=True)
+            
+            st.markdown("---")
+            excel_data = amz_convert_to_excel(df_final)
+            st.download_button("Download Full Excel Report", data=excel_data, file_name='amazon_reconciliation.xlsx')
+
+    else:
+        # Empty State
+        total_exp = storage + ads + salary + misc
+        st.subheader("Current Other Expenses Input (No Sales Data)")
+        k1, k2 = st.columns(2)
+        k1.metric("TOTAL PROFIT/LOSS (Expected)", f"INR {-total_exp:,.2f}")
+        k2.metric("Total Expenses Input", f"INR {total_exp:,.2f}")
+        
+        st.markdown("**Monthly Expenses Breakdown:**")
+        e1, e2, e3, e4 = st.columns(4)
+        e1.metric("Storage Fee", f"INR {storage:,.2f}")
+        e2.metric("Ads Spends", f"INR {ads:,.2f}")
+        e3.metric("Total Salary", f"INR {salary:,.2f}")
+        e4.metric("Miscellaneous Expenses", f"INR {misc:,.2f}")
+        st.markdown("---")
+        st.info("Please upload your Payment Reports (.zip) and MTR Reports (.csv) in the sidebar.")
+
+# ==========================================
+# MODULE 4: AJIO EXECUTION
+# ==========================================
+def run_ajio_tool():
+    st.markdown("""
+        <style>
+        div[data-testid="stMetric"] {
+            background-color: var(--secondary-background-color) !important;
+            border-left: 5px solid #FF4B4B;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0px 2px 4px rgba(0,0,0,0.1);
+        }
+        div[data-testid="stMetricLabel"] > div {
+            opacity: 0.8;
+            font-size: 0.9rem;
+        }
+        div[data-testid="stMetricValue"] > div {
+            font-size: 1.5rem;
+            font-weight: 700;
+        }
+        </style>
+        """, unsafe_allow_html=True)
+
+    st.title("📊 Ajio Seller Reconciliation")
+    st.caption("Automated System | Consolidated View")
+    
+    st.sidebar.subheader("Ajio Uploads")
+    gst_file = st.sidebar.file_uploader("1. GST Report (Sales)", type=["csv", "xlsx"], key="ajio_gst")
+    rtv_file = st.sidebar.file_uploader("2. RTV Report (Returns)", type=["csv", "xlsx"], key="ajio_rtv")
+    payment_file = st.sidebar.file_uploader("3. Payment Report", type=["csv", "xlsx"], key="ajio_pay")
+    st.sidebar.divider()
+    run_btn = st.sidebar.button("🚀 Run Ajio Reconciliation", type="primary")
+
+    if run_btn and gst_file and rtv_file and payment_file:
+        with st.spinner("Processing Data..."):
             try:
-                # Perform reconciliation
-                df_recon = ajio_reconcile_sales(df_ajio)
+                def load_file(f):
+                    try: return pd.read_csv(f, encoding='utf-8-sig') if f.name.endswith('.csv') else pd.read_excel(f)
+                    except: return pd.read_csv(f, encoding='latin1') if f.name.endswith('.csv') else pd.read_excel(f)
 
-                # Summary Metrics
-                total_orders = df_recon['Order ID'].nunique()
-                total_settled = df_recon[df_recon['Status']=='🟢 Settled']['Order ID'].nunique()
-                total_less_payment = df_recon[df_recon['Status']=='⚠️ Less Payment']['Order ID'].nunique()
-                total_not_received = df_recon[df_recon['Status']=='🔴 Not Received']['Order ID'].nunique()
-                total_over_payment = df_recon[df_recon['Status']=='🔵 Over Payment']['Order ID'].nunique()
-                
-                col_m1, col_m2, col_m3, col_m4, col_m5 = st.columns(5)
-                col_m1.metric("Total Order Lines", len(df_recon))
-                col_m2.metric("Settled Orders (🟢)", total_settled)
-                col_m3.metric("Less Payment (⚠️)", total_less_payment)
-                col_m4.metric("Not Received (🔴)", total_not_received)
-                col_m5.metric("Total Diff", f"₹{df_recon['Final Difference'].sum():.2f}")
-                
-                st.markdown("---")
-                st.subheader("Reconciliation Details")
+                df_gst = load_file(gst_file)
+                df_rtv = load_file(rtv_file)
+                df_pay = load_file(payment_file)
 
-                t1, t2, t3 = st.tabs(["Issues (🔴/⚠️/🔵)", "Settled (🟢)", "Full Data"])
+                df_gst.columns = df_gst.columns.str.strip()
+                df_rtv.columns = df_rtv.columns.str.strip()
+                df_pay.columns = df_pay.columns.str.strip()
+
+                # GST
+                gst_order_col = ajio_find_col(df_gst, ['Cust Order No', 'Order No', 'Order ID'])
+                gst_val_col = ajio_find_col(df_gst, ['Invoice Value', 'Total Value', 'Taxable Value'])
+                gst_date_col = ajio_find_col(df_gst, ['Seller Invoice Date', 'Invoice Date']) 
                 
-                # Selecting relevant columns for display
-                final_cols = [
-                    'Status', 'Order ID', 'SKU', 'Invoice Amount', 'Commission', 'GST on Commission', 
-                    'Shipping Fee', 'GST on Shipping Fee', 'Return Value', 'Expected Payment', 
-                    'Payment Received', 'Final Difference'
-                ]
+                if not gst_order_col: st.error("GST Missing Order ID"); st.stop()
+                
+                df_gst_clean = pd.DataFrame()
+                df_gst_clean['Cust Order No'] = ajio_clean_order_id(df_gst[gst_order_col])
+                df_gst_clean['Invoice Value'] = df_gst[gst_val_col].apply(ajio_clean_currency)
+                
+                if gst_date_col:
+                    df_gst_clean['Invoice Date'] = df_gst[gst_date_col].astype(str).apply(ajio_parse_date)
+                else: df_gst_clean['Invoice Date'] = None
+                
+                gst_agg = {'Invoice Value': 'sum', 'Invoice Date': 'first'}
+                df_gst_clean = df_gst_clean.groupby('Cust Order No', as_index=False).agg(gst_agg)
+
+                # RTV
+                rtv_order_col = ajio_find_col(df_rtv, ['Cust Order No', 'Order No'])
+                rtv_val_col = ajio_find_col(df_rtv, ['Return Value', 'Refund Amount'])
+                rtv_type_col = ajio_find_col(df_rtv, ['Return Type', 'Disposition', 'Reason']) 
+                
+                df_rtv_clean = pd.DataFrame()
+                df_rtv_clean['Cust Order No'] = ajio_clean_order_id(df_rtv[rtv_order_col])
+                df_rtv_clean['Return Value'] = df_rtv[rtv_val_col].apply(ajio_clean_currency)
+                df_rtv_clean['Return Type'] = df_rtv[rtv_type_col] if rtv_type_col else ''
+
+                rtv_agg = {'Return Value': 'sum', 'Return Type': ajio_get_first_val}
+                df_rtv_clean = df_rtv_clean.groupby('Cust Order No', as_index=False).agg(rtv_agg)
+
+                # Payment
+                pay_order_col = ajio_find_col(df_pay, ['Order No', 'Cust Order No'])
+                pay_val_col = ajio_find_col(df_pay, ['Value', 'Payment Amount'])
+                pay_date_col = ajio_find_col(df_pay, ['Expected settlement date', 'Settlement Date'])
+                
+                df_pay_clean = pd.DataFrame()
+                df_pay_clean['Cust Order No'] = ajio_clean_order_id(df_pay[pay_order_col])
+                df_pay_clean['Payment Received'] = df_pay[pay_val_col].apply(ajio_clean_currency)
+                if pay_date_col:
+                    df_pay_clean['Settlement Date'] = df_pay[pay_date_col].astype(str).apply(ajio_parse_date)
+                else: df_pay_clean['Settlement Date'] = None
+                
+                pay_agg = {'Payment Received': 'sum', 'Settlement Date': 'first'}
+                df_pay_clean = df_pay_clean.groupby('Cust Order No', as_index=False).agg(pay_agg)
+
+                # Merge
+                df_recon = pd.merge(df_gst_clean, df_rtv_clean, on='Cust Order No', how='outer')
+                df_recon = pd.merge(df_recon, df_pay_clean, on='Cust Order No', how='left')
+                df_recon.fillna(0, inplace=True)
+
+                df_recon['Expected Payment'] = df_recon['Invoice Value'] - df_recon['Return Value']
+                df_recon['Final Difference'] = np.where(
+                    (df_recon['Invoice Value']>0) & (df_recon['Return Value']>0),
+                    df_recon['Expected Payment'],
+                    df_recon['Expected Payment'] - df_recon['Payment Received']
+                )
+                df_recon['Final Difference'] = df_recon['Final Difference'].round(2)
+
+                def get_status(row):
+                    d = row['Final Difference']
+                    if row['Payment Received']==0 and row['Expected Payment']>0 and row['Return Value']==0: return "🔴 Not Received"
+                    if abs(d)<=10: return "🟢 Settled"
+                    return "⚠️ Less Payment" if d>10 else "🔵 Over Payment"
+                
+                df_recon['Status'] = df_recon.apply(get_status, axis=1)
+                df_recon['Remarks'] = df_recon.apply(lambda x: f"Type: {x['Return Type']}" if x['Return Type'] else "Standard", axis=1)
+
+                total_sales = df_recon['Invoice Value'].sum()
+                total_ret = df_recon['Return Value'].sum()
+                total_exp = total_sales - total_ret
+                total_rec = df_recon['Payment Received'].sum()
+                net_pend = df_recon['Final Difference'].sum()
+
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Total Sales", f"₹{total_sales:,.0f}")
+                m2.metric("Returns", f"₹{total_ret:,.0f}", delta_color="inverse")
+                m3.metric("Expected", f"₹{total_exp:,.0f}")
+                st.divider()
+                m4, m5, m6 = st.columns(3)
+                m4.metric("Received", f"₹{total_rec:,.2f}")
+                m5.metric("Net Pending", f"₹{net_pend:,.2f}", delta="Receivable" if net_pend>0 else "Payable", delta_color="inverse" if net_pend>0 else "normal")
+
+                st.markdown("### 📅 Settlement Date-wise Analysis")
+                if 'Settlement Date' in df_recon.columns and df_recon['Settlement Date'].notna().any():
+                    df_settle = df_recon.dropna(subset=['Settlement Date']).copy()
+                    df_settle['Settlement Date'] = pd.to_datetime(df_settle['Settlement Date'], errors='coerce')
+                    df_settle = df_settle.dropna(subset=['Settlement Date'])
+                    if not df_settle.empty:
+                        df_settle['Settlement Date'] = df_settle['Settlement Date'].dt.date
+                        grp = df_settle.groupby('Settlement Date').agg({'Cust Order No':'count', 'Expected Payment':'sum', 'Payment Received':'sum', 'Final Difference':'sum'}).reset_index()
+                        grp = grp.sort_values('Settlement Date')
+                        st_conf = {
+                            "Date": st.column_config.DateColumn("Settlement Date", format="DD-MMM-YYYY"),
+                            "Expected": st.column_config.NumberColumn("Expected", format="₹%.2f"),
+                            "Received": st.column_config.NumberColumn("Received", format="₹%.2f"),
+                            "Diff": st.column_config.NumberColumn("Diff", format="₹%.2f"),
+                        }
+                        grp.columns = ['Date', 'Orders', 'Expected', 'Received', 'Diff']
+                        st.dataframe(grp, column_config=st_conf, use_container_width=True, hide_index=True)
+
+                t1, t2, t3 = st.tabs(["🚨 Action", "✅ Settled", "📄 All Data"])
+                available_cols = ['Cust Order No', 'Invoice Date', 'Settlement Date', 'Invoice Value', 'Return Value', 'Expected Payment', 'Payment Received', 'Final Difference', 'Status', 'Remarks']
+                final_cols = [c for c in available_cols if c in df_recon.columns]
                 
                 col_config = {
-                    "Status": st.column_config.TextColumn("Status"),
-                    "Order ID": "Order ID",
-                    "SKU": "SKU",
-                    "Invoice Amount": st.column_config.NumberColumn("Invoice Amt", format="₹%.2f"),
-                    "Commission": st.column_config.NumberColumn("Comm", format="₹%.2f"),
-                    "GST on Commission": st.column_config.NumberColumn("Comm GST", format="₹%.2f"),
-                    "Shipping Fee": st.column_config.NumberColumn("Shipping Fee", format="₹%.2f"),
-                    "GST on Shipping Fee": st.column_config.NumberColumn("Shipping GST", format="₹%.2f"),
+                    "Cust Order No": st.column_config.TextColumn("Order ID"),
+                    "Invoice Date": st.column_config.DateColumn("Inv Date", format="DD-MMM-YYYY"),
+                    "Settlement Date": st.column_config.DateColumn("Settle Date", format="DD-MMM-YYYY"),
+                    "Invoice Value": st.column_config.NumberColumn("Sales", format="₹%.2f"),
                     "Return Value": st.column_config.NumberColumn("Returns", format="₹%.2f"),
                     "Payment Received": st.column_config.NumberColumn("Received", format="₹%.2f"),
                     "Expected Payment": st.column_config.NumberColumn("Expected", format="₹%.2f"),
@@ -469,6 +604,6 @@ st.sidebar.title("🔧 Navigation")
 tool_selection = st.sidebar.selectbox("Select Platform:", ["Amazon Reconciliation", "Ajio Reconciliation"])
 
 if tool_selection == "Amazon Reconciliation":
-    amazon_reconciliation_tool()
+    run_amazon_tool()
 elif tool_selection == "Ajio Reconciliation":
-    ajio_reconciliation_tool()
+    run_ajio_tool()
