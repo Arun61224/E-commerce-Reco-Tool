@@ -236,7 +236,7 @@ def amz_create_final_reconciliation_df(df_fin, df_log, df_cost):
     df_final['Product Cost'] = pd.to_numeric(df_final['Product Cost'], errors='coerce').fillna(0)
     df_final['Quantity'] = pd.to_numeric(df_final['Quantity'], errors='coerce').fillna(1).astype(int)
     
-    # --- 4. REFUND/CANCEL/FREEREPLACEMENT COST LOGIC (UPDATED) ---
+    # --- 4. REFUND/CANCEL/FREEREPLACEMENT COST LOGIC ---
     trans_type = df_final['Transaction Type'].astype(str).str.strip().str.lower() if 'Transaction Type' in df_final.columns else pd.Series()
     
     is_refund = trans_type.isin(['refund'])
@@ -247,7 +247,8 @@ def amz_create_final_reconciliation_df(df_fin, df_log, df_cost):
     df_final.loc[is_refund, 'Quantity'] = -1 * df_final.loc[is_refund, 'Quantity'].abs()
     
     # 2. लेन-देन के प्रकार के आधार पर Product Cost में बदलाव करता है
-    # **UPDATED LOGIC:** Refund के लिए, Cost को अब -50% (नकारात्मक 50%) किया गया है, जैसा कि अनुरोध किया गया है।
+    # Refund: Product Cost = -0.5 * Original Cost (Negative 50%)
+    # Cancel: Product Cost = -0.2 * Original Cost
     conditions = [
         is_freereplacement,  # FreeReplacement: Product Cost = 0
         is_refund,           # Refund: Product Cost = -0.5 * Original Cost (Negative 50%)
@@ -307,7 +308,7 @@ def ajio_clean_order_id(series):
 
 
 # ==========================================
-# MODULE 3: AMAZON EXECUTION (ENHANCED)
+# MODULE 4: AMAZON EXECUTION
 # ==========================================
 def run_amazon_tool():
     st.title("💰 Amazon Seller Central Reconciliation Dashboard")
@@ -450,7 +451,7 @@ def run_amazon_tool():
         st.info("Please upload your Payment Reports (.zip) and MTR Reports (.csv) in the sidebar.")
 
 # ==========================================
-# MODULE 4: AJIO EXECUTION
+# MODULE 5: AJIO EXECUTION
 # ==========================================
 def run_ajio_tool():
     st.markdown("""
@@ -625,3 +626,53 @@ def run_ajio_tool():
 
             except Exception as e: st.error(f"Error: {e}")
     else: st.info("Upload files.")
+
+# ==========================================
+# MODULE 6: STARTER/NAVIGATION PAGE (NEW)
+# ==========================================
+def main_page():
+    st.title("E-commerce Reconciliation Master Tool 🚀")
+    st.markdown("---")
+    
+    st.header("Select Marketplace Tool:")
+    
+    st.markdown("""
+        <style>
+        .stButton>button {
+            width: 100%;
+            border-radius: 8px;
+            padding: 15px 10px;
+            font-size: 1.2rem;
+            font-weight: bold;
+        }
+        </style>
+        """, unsafe_allow_html=True)
+
+    c1, c2 = st.columns(2)
+    
+    # Checkbox state for navigation
+    if 'page' not in st.session_state:
+        st.session_state['page'] = 'home'
+
+    if c1.button("💰 Amazon Reconciliation"):
+        st.session_state['page'] = 'amazon'
+        st.rerun()
+
+    if c2.button("📊 Ajio Reconciliation"):
+        st.session_state['page'] = 'ajio'
+        st.rerun()
+
+    st.markdown("---")
+    st.info("Please select a marketplace above to view the respective reconciliation dashboard and upload options.")
+
+# --- APP EXECUTION FLOW ---
+
+if 'page' not in st.session_state:
+    st.session_state['page'] = 'home'
+
+if st.session_state['page'] == 'amazon':
+    run_amazon_tool()
+elif st.session_state['page'] == 'ajio':
+    run_ajio_tool()
+else:
+    main_page()
