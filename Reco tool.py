@@ -168,7 +168,9 @@ def amz_process_mtr_files(uploaded_files):
             df['Quantity'] = pd.to_numeric(df['Quantity'], errors='coerce').fillna(0).astype(int)
             df['MTR Invoice Amount'] = pd.to_numeric(df['MTR Invoice Amount'], errors='coerce').fillna(0)
             
-            all_mtr_data.append(df[required_mtr_cols])
+            # The 'Invoice Amount' column should be added to the required columns list for the next step.
+            full_required_cols = required_mtr_cols + ['MTR Invoice Amount']
+            all_mtr_data.append(df[df.columns.intersection(full_required_cols)])
             
         except Exception as e:
             st.error(f"Error processing MTR file '{file.name}': {e}")
@@ -197,9 +199,23 @@ def amz_filter_mtr_cancellations(df_mtr):
     st.info(f"Filtered out {len(df_mtr) - len(df_filtered)} 'Cancel' entries where a 'Shipment' transaction was also present for the same Order ID.")
     return df_filtered
 
-def amz_create_final_reconciliation_df(df_log, df_fin, df_cost, monthly_expense):
+def amz_create_final_reconciliation_df(df_log, df_payment, df_fees_summary, df_cost, monthly_expense):
+    """
+    Creates the final reconciliation DataFrame by merging MTR, Payment, Fees, and Cost data.
+    
+    Args:
+        df_log (DataFrame): MTR (Multi-Transaction Report) data (item-level log).
+        df_payment (DataFrame): Payment data aggregated by OrderID (Net Payment).
+        df_fees_summary (DataFrame): 1-row DataFrame containing aggregated fees/tax for the report period.
+        df_cost (DataFrame): Product cost per SKU.
+        monthly_expense (float): Overhead expense for the period.
+        
+    Returns:
+        tuple: (df_final, kpis)
+    """
+    
     # 1. Merge MTR (Item-level log) with Payment (Order-level financial summary)
-    df_final = pd.merge(df_log, df_fin, on='OrderID', how='left')
+    df_final = pd.merge(df_log, df_payment, on='OrderID', how='left')
     
     # 2. Add Cost Sheet Data
     df_final = pd.merge(df_final, df_cost, on='Sku', how='left')
@@ -213,10 +229,11 @@ def amz_create_final_reconciliation_df(df_log, df_fin, df_cost, monthly_expense)
     df_final[payment_cols] = df_final[payment_cols].fillna(0)
     
     # Add Fees/Tax data (Fees Summary has only one row, so we cross-join using a 'Key' column)
-    df_fees_summary = df_fin['fees_summary'].iloc[0]
-    df_fees_summary['Key'] = 1
+    # df_fees_summary is the 1-row DataFrame passed directly, which already contains the 'Key' column.
+    
     df_final['Key'] = 1
     
+    # Merge the fees summary (1-row DF) with the main dataframe (cross-join)
     df_final = pd.merge(df_final, df_fees_summary, on='Key', how='left').drop(columns=['Key']).fillna(0)
 
     # 4. Proportionate Fee and Payment Allocation (Crucial Step)
@@ -231,8 +248,11 @@ def amz_create_final_reconciliation_df(df_log, df_fin, df_cost, monthly_expense)
                                      0)
     
     # Distribute the Order-level financial metrics (Payment and Fees) based on Proportion
-    # Note: If an order is missing from the Payment Report, its Net Payment is 0, so the allocated values will be 0.
-    for col in payment_cols + list(df_fees_summary.drop(columns=['Key']).columns):
+    
+    # Collect fee columns from the fees summary DataFrame (excluding the 'Key')
+    fee_col_names = [col for col in df_fees_summary.columns if col != 'Key']
+    
+    for col in payment_cols + fee_col_names:
         if col in df_final.columns:
             # We are distributing the full *report-period total fees* across ALL items found in the MTR.
             # This assumes the total fees apply proportionally to all recorded MTR sales.
@@ -393,11 +413,12 @@ def run_amazon_tool():
                 st.error("One or more essential files failed to process. Check error messages above.")
                 return
 
-            # Add fees summary to payment df for merge
-            df_payment['fees_summary'] = df_fees_summary.apply(lambda x: x.to_dict(), axis=1)
-
+            # Note: df_fees_summary is a 1-row DataFrame containing aggregated fees/tax totals.
+            # We pass it separately to amz_create_final_reconciliation_df for cross-join merging.
+            
             # Create Final Reconciliation Table
-            df_final, kpis = amz_create_final_reconciliation_df(df_mtr, df_payment, df_cost, monthly_expense)
+            # UPDATED CALL: Pass df_fees_summary separately instead of embedding it as a dictionary in df_payment
+            df_final, kpis = amz_create_final_reconciliation_df(df_mtr, df_payment, df_fees_summary, df_cost, monthly_expense)
             
             # --- DISPLAY DASHBOARD ---
             st.header("Summary of Financial Performance")
