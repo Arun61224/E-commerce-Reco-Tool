@@ -566,6 +566,8 @@ def run_ajio_tool():
 # MASTER EXECUTION
 # ==========================================
 st.sidebar.title("🔧 Navigation")
+tool_selection = st.sidebar.selectbox("Select Platform:", ["Amazon Reconciliation", "Ajio Reconciliation"]) # This was missing
+
 if tool_selection == "Amazon Reconciliation":
     run_amazon_tool()
 elif tool_selection == "Ajio Reconciliation":
