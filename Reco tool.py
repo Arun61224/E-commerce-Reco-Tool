@@ -38,13 +38,13 @@ def amz_process_cost_sheet(uploaded_file):
         else:
             st.error(f"Error reading Cost Sheet: Unsupported file type.")
             return pd.DataFrame()
-        
+            
         df_cost.columns = [str(col).strip() for col in df_cost.columns]
         missing_cols = [col for col in required_cols if col not in df_cost.columns]
         if missing_cols:
             st.error(f"Cost Sheet Error: Missing columns: {', '.join(missing_cols)}")
             return pd.DataFrame()
-        
+            
         df_cost.rename(columns={'SKU': 'Sku'}, inplace=True)
         df_cost['Sku'] = df_cost['Sku'].astype(str)
         df_cost['Product Cost'] = pd.to_numeric(df_cost['Product Cost'], errors='coerce').fillna(0)
@@ -310,7 +310,7 @@ def ajio_clean_order_id(series):
 
 
 # ==========================================
-# MODULE 3: AMAZON EXECUTION
+# MODULE 3: AMAZON EXECUTION (ENHANCED)
 # ==========================================
 def run_amazon_tool():
     st.title("💰 Amazon Seller Central Reconciliation Dashboard")
@@ -353,6 +353,14 @@ def run_amazon_tool():
             
             df_final = amz_create_final_reconciliation_df(df_fin, df_log, df_cost)
             
+            # --- NEW ADDITION: FILTERING MISSING ORDERS ---
+            df_missing = df_final[df_final['Remarks'] == 'Order ID is not in this Payment report'].copy()
+            df_missing_summary = df_missing.groupby('OrderID').agg(
+                {'MTR Invoice Amount': 'sum', 'Transaction Type': lambda x: ', '.join(x.astype(str).unique()), 'Invoice Date': 'first'}
+            ).reset_index()
+            df_missing_summary.rename(columns={'MTR Invoice Amount': 'Total MTR Amount Missing', 'Transaction Type': 'Transaction Types', 'Invoice Date': 'Invoice Date (First Item)'}, inplace=True)
+            # ---------------------------------------------
+            
             # KPIs
             total_items = df_final.shape[0]
             total_mtr = df_final['MTR Invoice Amount'].sum()
@@ -382,6 +390,28 @@ def run_amazon_tool():
             e4.metric("Miscellaneous Expenses", f"INR {misc:,.2f}")
             st.markdown("---")
 
+            # --- NEW: SECTION FOR MISSING ORDERS ---
+            st.header("2. 🔴 Orders Missing from Payment Report")
+            if not df_missing_summary.empty:
+                st.warning(f"Found **{df_missing_summary.shape[0]}** unique Order IDs in MTR that are **Missing** from the uploaded Payment Reports.")
+                
+                # Column configuration for the missing orders table
+                missing_col_conf = {
+                    "Total MTR Amount Missing": st.column_config.NumberColumn("Total MTR Value", format="INR %.2f"),
+                    "OrderID": st.column_config.TextColumn("Order ID"),
+                    "Transaction Types": st.column_config.TextColumn("Trans. Types (MTR)"),
+                    "Invoice Date (First Item)": st.column_config.DateColumn("MTR Date", format="DD-MMM-YYYY")
+                }
+                
+                st.dataframe(df_missing_summary, 
+                             column_config=missing_col_conf, 
+                             use_container_width=True, 
+                             hide_index=True)
+            else:
+                st.success("✅ All Order IDs from the MTR Report were found in the Payment Reports.")
+            st.markdown("---")
+            # ----------------------------------------
+            
             # Table
             st.header("1. Item-Level Reconciliation Summary (MTR Details + Classified Charges)")
             if 'OrderID' in df_final.columns:
@@ -524,21 +554,24 @@ def run_ajio_tool():
                 df_recon.fillna(0, inplace=True)
 
                 df_recon['Expected Payment'] = df_recon['Invoice Value'] - df_recon['Return Value']
-                df_recon['Final Difference'] = np.where(
-                    (df_recon['Invoice Value']>0) & (df_recon['Return Value']>0),
-                    df_recon['Expected Payment'],
-                    df_recon['Expected Payment'] - df_recon['Payment Received']
-                )
+                
+                # Simplified and correct Final Difference calculation: Expected vs Received
+                df_recon['Final Difference'] = df_recon['Expected Payment'] - df_recon['Payment Received']
                 df_recon['Final Difference'] = df_recon['Final Difference'].round(2)
 
                 def get_status(row):
                     d = row['Final Difference']
-                    if row['Payment Received']==0 and row['Expected Payment']>0 and row['Return Value']==0: return "🔴 Not Received"
-                    if abs(d)<=10: return "🟢 Settled"
-                    return "⚠️ Less Payment" if d>10 else "🔵 Over Payment"
+                    # Use a small tolerance for 'Settled'
+                    if abs(d) <= 10: return "🟢 Settled"
+                    # Not Received: Expected payment > 0 but received 0
+                    if row['Payment Received'] == 0 and row['Expected Payment'] > 0 and row['Return Value'] == 0: return "🔴 Not Received"
+                    # Less Payment: Expected > Received
+                    if d > 10: return "⚠️ Less Payment"
+                    # Over Payment: Received > Expected
+                    return "🔵 Over Payment"
                 
                 df_recon['Status'] = df_recon.apply(get_status, axis=1)
-                df_recon['Remarks'] = df_recon.apply(lambda x: f"Type: {x['Return Type']}" if x['Return Type'] else "Standard", axis=1)
+                df_recon['Remarks'] = df_recon.apply(lambda x: f"Type: {x['Return Type']}" if x['Return Type'] and x['Return Value']!=0 else "Standard", axis=1)
 
                 total_sales = df_recon['Invoice Value'].sum()
                 total_ret = df_recon['Return Value'].sum()
