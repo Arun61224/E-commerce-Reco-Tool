@@ -13,6 +13,7 @@ st.set_page_config(layout="wide", page_title="E-commerce Reconciliation Master T
 # --- 2. GLOBAL HELPER FUNCTIONS (AMAZON) ---
 @st.cache_data
 def amz_create_cost_sheet_template():
+    # लागत शीट टेम्पलेट बनाता है
     template_data = {
         'SKU': ['ExampleSKU-001', 'ExampleSKU-002'],
         'Product Cost': [150.50, 220.00]
@@ -24,6 +25,7 @@ def amz_create_cost_sheet_template():
     return output.getvalue()
 
 def amz_process_cost_sheet(uploaded_file):
+    # प्रोडक्ट कॉस्ट शीट को प्रोसेस करता है
     required_cols = ['SKU', 'Product Cost']
     try:
         filename = uploaded_file.name.lower()
@@ -55,6 +57,7 @@ def amz_process_cost_sheet(uploaded_file):
 
 @st.cache_data
 def amz_convert_to_excel(df):
+    # अंतिम DataFrame को Excel फ़ाइल में बदलता है
     output = io.BytesIO()
     df_excel = df.copy()
     numeric_cols = [
@@ -74,6 +77,7 @@ def amz_convert_to_excel(df):
     return output.getvalue()
 
 def amz_calculate_fee_total(df, keyword, name):
+    # पेमेंट रिपोर्ट से विशिष्ट शुल्क (Fees) को निकालता है
     if 'amount-description' not in df.columns:
         return pd.DataFrame({'OrderID': pd.Series(dtype='str'), name: pd.Series(dtype='float')})
     df_filtered = df.dropna(subset=['amount-description'])
@@ -85,6 +89,7 @@ def amz_calculate_fee_total(df, keyword, name):
     return df_summary
 
 def amz_process_payment_zip_file(uploaded_zip_file):
+    # ज़िप फ़ाइल से पेमेंट रिपोर्ट फ़ाइलों को निकालता है
     payment_files = []
     try:
         with zipfile.ZipFile(uploaded_zip_file, 'r') as zf:
@@ -105,6 +110,7 @@ def amz_process_payment_zip_file(uploaded_zip_file):
     return payment_files
 
 def amz_process_payment_files(uploaded_payment_files):
+    # सभी पेमेंट रिपोर्ट को एक साथ प्रोसेस करता है और शुल्क (Fees) निकालता है
     all_payment_data = []
     required_cols_lower = ['order-id', 'amount-description', 'amount']
     for file in uploaded_payment_files:
@@ -142,7 +148,7 @@ def amz_process_payment_files(uploaded_payment_files):
     
     df_fin = df_charge.groupby('OrderID')['amount'].sum().reset_index(name='Net_Payment_Fetched')
     
-    # Fees
+    # Fees कैलकुलेशन
     df_comm = amz_calculate_fee_total(df_charge, 'Commission', 'Total_Commission_Fee')
     df_fixed = amz_calculate_fee_total(df_charge, 'Fixed closing fee', 'Total_Fixed_Closing_Fee')
     df_pick = amz_calculate_fee_total(df_charge, 'Pick & Pack Fee', 'Total_FBA_Pick_Pack_Fee')
@@ -160,6 +166,7 @@ def amz_process_payment_files(uploaded_payment_files):
     return df_fin, df_charge
 
 def amz_process_mtr_files(uploaded_mtr_files):
+    # MTR रिपोर्ट को प्रोसेस करता है
     all_mtr = []
     req_cols = ['Invoice Number', 'Invoice Date', 'Transaction Type', 'Order Id', 'Quantity', 'Sku', 'Invoice Amount']
     for file in uploaded_mtr_files:
@@ -182,33 +189,22 @@ def amz_process_mtr_files(uploaded_mtr_files):
 
 @st.cache_data(show_spinner="Merging...")
 def amz_create_final_reconciliation_df(df_fin, df_log, df_cost):
+    # अंतिम रीकन्सीलिएशन DataFrame बनाता है
     if df_log.empty or df_fin.empty: return pd.DataFrame()
     
-    # --- 1. FILTER LOGIC: REMOVE CANCEL TRANSACTIONS THAT ALSO APPEAR AS SHIPMENTS ---
-    
-    # Identify valid Shipment Order IDs (Set A)
+    # --- 1. लॉजिक: उन 'Cancel' लेन-देन को हटाता है जो 'Shipment' के रूप में भी मौजूद हैं ---
     valid_shipment_orders = set(
         df_log[df_log['Transaction Type'].astype(str).str.lower() == 'shipment']['OrderID'].unique()
     )
-    
-    # Filter df_log to apply the custom logic
     df_log['TransType_Lower'] = df_log['Transaction Type'].astype(str).str.lower()
-    
-    # Check 1: Is the row a 'Cancel' transaction?
     is_cancel_row = df_log['TransType_Lower'].str.contains('cancel', na=False)
-    
-    # Check 2: Does this OrderID also exist in the 'Shipment' set?
     is_in_shipment = df_log['OrderID'].isin(valid_shipment_orders)
-    
-    # The condition for removal: is a Cancel AND exists as a Shipment.
     should_be_removed = (is_cancel_row) & (is_in_shipment)
-    
-    # Remove the rows that satisfy the removal condition.
     df_log = df_log[~should_be_removed].copy()
     df_log.drop(columns=['TransType_Lower'], inplace=True)
     # ------------------------------------------------------------------------------------
 
-    # --- 2. Merge Logic with Indicator ---
+    # --- 2. Payment Data के साथ Merge करता है ---
     try:
         df_final = pd.merge(df_log, df_fin, on='OrderID', how='left', indicator='_merge_status')
     except: return pd.DataFrame()
@@ -217,7 +213,7 @@ def amz_create_final_reconciliation_df(df_fin, df_log, df_cost):
     df_final['Remarks'] = np.where(df_final['_merge_status'] == 'left_only', 'Order ID is not in this Payment report', '')
     df_final.drop(columns=['_merge_status'], inplace=True)
     
-    # Calculations
+    # Proportional Allocation
     df_final['Total_MTR_per_Order'] = df_final.groupby('OrderID')['MTR Invoice Amount'].transform('sum')
     df_final['Item_Count'] = df_final.groupby('OrderID')['OrderID'].transform('count')
     df_final['Proportion'] = np.where(df_final['Total_MTR_per_Order']!=0, df_final['MTR Invoice Amount']/df_final['Total_MTR_per_Order'], 1/df_final['Item_Count'])
@@ -240,29 +236,30 @@ def amz_create_final_reconciliation_df(df_fin, df_log, df_cost):
     df_final['Product Cost'] = pd.to_numeric(df_final['Product Cost'], errors='coerce').fillna(0)
     df_final['Quantity'] = pd.to_numeric(df_final['Quantity'], errors='coerce').fillna(1).astype(int)
     
-    # --- 4. REFUND/CANCEL/FREEREPLACEMENT COST LOGIC ---
+    # --- 4. REFUND/CANCEL/FREEREPLACEMENT COST LOGIC (UPDATED) ---
     trans_type = df_final['Transaction Type'].astype(str).str.strip().str.lower() if 'Transaction Type' in df_final.columns else pd.Series()
     
     is_refund = trans_type.isin(['refund'])
     is_cancel = trans_type.str.contains('cancel', na=False)
-    is_freereplacement = trans_type.isin(['freereplacement']) # New condition for FreeReplacement
+    is_freereplacement = trans_type.isin(['freereplacement']) 
     
-    # 1. Make Quantity Negative ONLY for Refunds
+    # 1. Quantity को नकारात्मक करता है (केवल Refunds के लिए)
     df_final.loc[is_refund, 'Quantity'] = -1 * df_final.loc[is_refund, 'Quantity'].abs()
     
-    # 2. Adjust Cost Logic based on transaction type
+    # 2. लेन-देन के प्रकार के आधार पर Product Cost में बदलाव करता है
+    # **UPDATED LOGIC:** Refund के लिए, Cost को अब -50% (नकारात्मक 50%) किया गया है, जैसा कि अनुरोध किया गया है।
     conditions = [
         is_freereplacement,  # FreeReplacement: Product Cost = 0
-        is_refund,           # Refund: Product Cost = 50%
-        is_cancel            # Cancel: Product Cost = -20% (Negative 20% of original cost)
+        is_refund,           # Refund: Product Cost = -0.5 * Original Cost (Negative 50%)
+        is_cancel            # Cancel: Product Cost = -0.2 * Original Cost
     ]
     choices = [
         0,                                   # For FreeReplacement
-        0.5 * df_final['Product Cost'],      # For Refund
+        -0.5 * df_final['Product Cost'],     # For Refund (50% Cost, Made Negative)
         -0.2 * df_final['Product Cost']      # For Cancel
     ]
     
-    # Apply cost adjustment. Default value is the original Product Cost (for 'Shipment' etc.)
+    # Default value Original Product Cost (for 'Shipment' etc.) है
     df_final['Product Cost'] = np.select(conditions, choices, default=df_final['Product Cost'])
     
     # Final Clean before Calc
@@ -353,13 +350,13 @@ def run_amazon_tool():
             
             df_final = amz_create_final_reconciliation_df(df_fin, df_log, df_cost)
             
-            # --- NEW ADDITION: FILTERING MISSING ORDERS ---
+            # --- MISSING ORDERS ---
             df_missing = df_final[df_final['Remarks'] == 'Order ID is not in this Payment report'].copy()
             df_missing_summary = df_missing.groupby('OrderID').agg(
                 {'MTR Invoice Amount': 'sum', 'Transaction Type': lambda x: ', '.join(x.astype(str).unique()), 'Invoice Date': 'first'}
             ).reset_index()
             df_missing_summary.rename(columns={'MTR Invoice Amount': 'Total MTR Amount Missing', 'Transaction Type': 'Transaction Types', 'Invoice Date': 'Invoice Date (First Item)'}, inplace=True)
-            # ---------------------------------------------
+            # ----------------------
             
             # KPIs
             total_items = df_final.shape[0]
@@ -378,7 +375,7 @@ def run_amazon_tool():
             k2.metric("Total Net Payment", f"INR {total_pay:,.2f}")
             k3.metric("Total MTR Invoiced", f"INR {total_mtr:,.2f}")
             k4.metric("Total Amazon Fees", f"INR {total_fees:,.2f}")
-            k5.metric("Total Product Cost", f"INR {total_cost:,.2f}")
+            k5.metric("Total Product Cost (Adjusted)", f"INR {total_cost:,.2f}")
             
             k6.metric("TOTAL PROFIT/LOSS (Final)", f"INR {final_profit:,.2f}", delta=f"Other Expenses: INR {total_exp:,.2f}")
             
@@ -390,12 +387,11 @@ def run_amazon_tool():
             e4.metric("Miscellaneous Expenses", f"INR {misc:,.2f}")
             st.markdown("---")
 
-            # --- NEW: SECTION FOR MISSING ORDERS ---
+            # --- SECTION FOR MISSING ORDERS ---
             st.header("2. 🔴 Orders Missing from Payment Report")
             if not df_missing_summary.empty:
                 st.warning(f"Found **{df_missing_summary.shape[0]}** unique Order IDs in MTR that are **Missing** from the uploaded Payment Reports.")
                 
-                # Column configuration for the missing orders table
                 missing_col_conf = {
                     "Total MTR Amount Missing": st.column_config.NumberColumn("Total MTR Value", format="INR %.2f"),
                     "OrderID": st.column_config.TextColumn("Order ID"),
@@ -629,14 +625,3 @@ def run_ajio_tool():
 
             except Exception as e: st.error(f"Error: {e}")
     else: st.info("Upload files.")
-
-# ==========================================
-# MASTER EXECUTION
-# ==========================================
-st.sidebar.title("🔧 Navigation")
-tool_selection = st.sidebar.selectbox("Select Platform:", ["Amazon Reconciliation", "Ajio Reconciliation"])
-
-if tool_selection == "Amazon Reconciliation":
-    run_amazon_tool()
-elif tool_selection == "Ajio Reconciliation":
-    run_ajio_tool()
