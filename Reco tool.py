@@ -16,7 +16,7 @@ tool_selection = st.sidebar.selectbox("Select Platform:", ["Amazon Reconciliatio
 st.sidebar.markdown("---")
 
 # ==========================================
-# MODULE 1: AMAZON RECONCILIATION (EXACT OLD DESIGN)
+# MODULE 1: AMAZON RECONCILIATION (BREAKDOWN ADDED BACK)
 # ==========================================
 def run_amazon_tool():
     # --- HELPER FUNCTIONS ---
@@ -217,9 +217,8 @@ def run_amazon_tool():
         df_final['Product Profit/Loss'] = df_final['Net Payment'] - (df_final['Product Cost'] * df_final['Quantity'])
         return df_final
 
-    # --- AMAZON UI (MATCHING OLD DESIGN) ---
+    # --- AMAZON UI ---
     st.title("💰 Amazon Seller Central Reconciliation Dashboard")
-    # Note: Removed "(Detailed)" from title
     st.markdown("---")
 
     # Sidebar
@@ -232,7 +231,7 @@ def run_amazon_tool():
     payment_zip_files = st.sidebar.file_uploader("2. Payment Reports (.zip)", type=['zip'], accept_multiple_files=True, key="amz_zip")
     mtr_files = st.sidebar.file_uploader("3. MTR Reports (.csv)", type=['csv'], accept_multiple_files=True, key="amz_mtr")
 
-    # Main Page Inputs (Header Changed to Match Old Tool)
+    # Main Page Inputs
     st.subheader("Monthly Expenses (Manual Input)") 
     c1, c2, c3, c4 = st.columns(4)
     storage = c1.number_input("Monthly Storage Fee (INR)", value=0.0, step=100.0, key="amz_store")
@@ -240,11 +239,9 @@ def run_amazon_tool():
     salary = c3.number_input("Total Salary (INR)", value=0.0, step=1000.0, key="amz_sal")
     misc = c4.number_input("Miscellaneous Expenses (INR)", value=0.0, step=100.0, key="amz_misc")
     
-    # Removed "st.markdown('---')" here to match tight spacing if preferred, or keep it. Keeping for now.
-
     # Logic
     if payment_zip_files and mtr_files:
-        st.markdown("---") # Added separator when data exists
+        st.markdown("---")
         df_cost = process_cost_sheet(cost_file) if cost_file else pd.DataFrame()
         
         all_zips = []
@@ -281,10 +278,9 @@ def run_amazon_tool():
             k4.metric("Total Amazon Fees", f"INR {total_fees:,.2f}")
             k5.metric("Total Product Cost", f"INR {total_cost:,.2f}")
             
-            # Green Pill for Expenses
             k6.metric("TOTAL PROFIT/LOSS (Final)", f"INR {final_profit:,.2f}", delta=f"Other Expenses: INR {total_exp:,.2f}")
             
-            # Show Breakdown only when data is loaded (Matches New behavior but user didn't complain about this part when data is there)
+            # --- BREAKDOWN ADDED BACK HERE ---
             st.markdown("**Monthly Expenses Breakdown:**")
             e1, e2, e3, e4 = st.columns(4)
             e1.metric("Storage Fee", f"INR {storage:,.2f}")
@@ -315,19 +311,25 @@ def run_amazon_tool():
             st.download_button("Download Full Excel Report", data=excel_data, file_name='amazon_reconciliation.xlsx')
 
     else:
-        # --- EMPTY STATE (EXACTLY MATCHING IMAGE 1) ---
+        # --- EMPTY STATE (BREAKDOWN ADDED BACK HERE TOO) ---
         total_exp = storage + ads + salary + misc
         st.subheader("Current Other Expenses Input (No Sales Data)")
         k1, k2 = st.columns(2)
         k1.metric("TOTAL PROFIT/LOSS (Expected)", f"INR {-total_exp:,.2f}")
         k2.metric("Total Expenses Input", f"INR {total_exp:,.2f}")
         
-        # REMOVED the extra breakdown section here to match Image 1
+        st.markdown("**Monthly Expenses Breakdown:**")
+        e1, e2, e3, e4 = st.columns(4)
+        e1.metric("Storage Fee", f"INR {storage:,.2f}")
+        e2.metric("Ads Spends", f"INR {ads:,.2f}")
+        e3.metric("Total Salary", f"INR {salary:,.2f}")
+        e4.metric("Miscellaneous Expenses", f"INR {misc:,.2f}")
+        st.markdown("---")
         
         st.info("Please upload your Payment Reports (.zip) and MTR Reports (.csv) in the sidebar to start the reconciliation. The dashboard will appear automatically once files are uploaded.")
 
 # ==========================================
-# MODULE 2: AJIO RECONCILIATION (DATE FIX INCLUDED)
+# MODULE 2: AJIO RECONCILIATION
 # ==========================================
 def run_ajio_tool():
     st.markdown("""
