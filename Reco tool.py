@@ -16,7 +16,7 @@ tool_selection = st.sidebar.selectbox("Select Platform:", ["Amazon Reconciliatio
 st.sidebar.markdown("---")
 
 # ==========================================
-# MODULE 1: AMAZON RECONCILIATION (GREEN EXPENSES FIXED)
+# MODULE 1: AMAZON RECONCILIATION (EXACT OLD DESIGN)
 # ==========================================
 def run_amazon_tool():
     # --- HELPER FUNCTIONS ---
@@ -217,8 +217,9 @@ def run_amazon_tool():
         df_final['Product Profit/Loss'] = df_final['Net Payment'] - (df_final['Product Cost'] * df_final['Quantity'])
         return df_final
 
-    # --- AMAZON UI ---
+    # --- AMAZON UI (MATCHING OLD DESIGN) ---
     st.title("💰 Amazon Seller Central Reconciliation Dashboard")
+    # Note: Removed "(Detailed)" from title
     st.markdown("---")
 
     # Sidebar
@@ -231,17 +232,19 @@ def run_amazon_tool():
     payment_zip_files = st.sidebar.file_uploader("2. Payment Reports (.zip)", type=['zip'], accept_multiple_files=True, key="amz_zip")
     mtr_files = st.sidebar.file_uploader("3. MTR Reports (.csv)", type=['csv'], accept_multiple_files=True, key="amz_mtr")
 
-    # Main Page Inputs
-    st.subheader("Monthly Expenses (Manual Input)")
+    # Main Page Inputs (Header Changed to Match Old Tool)
+    st.subheader("Monthly Expenses (Manual Input)") 
     c1, c2, c3, c4 = st.columns(4)
     storage = c1.number_input("Monthly Storage Fee (INR)", value=0.0, step=100.0, key="amz_store")
     ads = c2.number_input("Monthly Advertising Spends (INR)", value=0.0, step=100.0, key="amz_ads")
     salary = c3.number_input("Total Salary (INR)", value=0.0, step=1000.0, key="amz_sal")
     misc = c4.number_input("Miscellaneous Expenses (INR)", value=0.0, step=100.0, key="amz_misc")
-    st.markdown("---")
+    
+    # Removed "st.markdown('---')" here to match tight spacing if preferred, or keep it. Keeping for now.
 
     # Logic
     if payment_zip_files and mtr_files:
+        st.markdown("---") # Added separator when data exists
         df_cost = process_cost_sheet(cost_file) if cost_file else pd.DataFrame()
         
         all_zips = []
@@ -281,6 +284,7 @@ def run_amazon_tool():
             # Green Pill for Expenses
             k6.metric("TOTAL PROFIT/LOSS (Final)", f"INR {final_profit:,.2f}", delta=f"Other Expenses: INR {total_exp:,.2f}")
             
+            # Show Breakdown only when data is loaded (Matches New behavior but user didn't complain about this part when data is there)
             st.markdown("**Monthly Expenses Breakdown:**")
             e1, e2, e3, e4 = st.columns(4)
             e1.metric("Storage Fee", f"INR {storage:,.2f}")
@@ -311,16 +315,19 @@ def run_amazon_tool():
             st.download_button("Download Full Excel Report", data=excel_data, file_name='amazon_reconciliation.xlsx')
 
     else:
-        # No data state
+        # --- EMPTY STATE (EXACTLY MATCHING IMAGE 1) ---
         total_exp = storage + ads + salary + misc
         st.subheader("Current Other Expenses Input (No Sales Data)")
         k1, k2 = st.columns(2)
         k1.metric("TOTAL PROFIT/LOSS (Expected)", f"INR {-total_exp:,.2f}")
         k2.metric("Total Expenses Input", f"INR {total_exp:,.2f}")
-        st.info("Upload files to see data.")
+        
+        # REMOVED the extra breakdown section here to match Image 1
+        
+        st.info("Please upload your Payment Reports (.zip) and MTR Reports (.csv) in the sidebar to start the reconciliation. The dashboard will appear automatically once files are uploaded.")
 
 # ==========================================
-# MODULE 2: AJIO RECONCILIATION (DETAILED & FIXED)
+# MODULE 2: AJIO RECONCILIATION (DATE FIX INCLUDED)
 # ==========================================
 def run_ajio_tool():
     st.markdown("""
@@ -406,10 +413,10 @@ def run_ajio_tool():
                 df_rtv.columns = df_rtv.columns.str.strip()
                 df_pay.columns = df_pay.columns.str.strip()
 
-                # --- 1. GST PROCESSING (FIXED: Added Date Aggregation) ---
+                # --- 1. GST PROCESSING ---
                 gst_order_col = find_col(df_gst, ['Cust Order No', 'Order No', 'Order ID'])
                 gst_val_col = find_col(df_gst, ['Invoice Value', 'Total Value', 'Taxable Value'])
-                gst_date_col = find_col(df_gst, ['Seller Invoice Date', 'Invoice Date']) # Fixed: Added Date Finding
+                gst_date_col = find_col(df_gst, ['Seller Invoice Date', 'Invoice Date']) 
                 
                 if not gst_order_col: st.error("GST Missing Order ID"); st.stop()
                 
@@ -422,25 +429,24 @@ def run_ajio_tool():
                 else:
                     df_gst_clean['Invoice Date'] = None
                 
-                # Fixed: Aggregation dictionary to preserve Date
+                # FIXED AGGREGATION
                 gst_agg = {'Invoice Value': 'sum', 'Invoice Date': 'first'}
                 df_gst_clean = df_gst_clean.groupby('Cust Order No', as_index=False).agg(gst_agg)
 
-                # --- 2. RTV PROCESSING (FIXED: Added Type & Date Aggregation) ---
+                # --- 2. RTV PROCESSING ---
                 rtv_order_col = find_col(df_rtv, ['Cust Order No', 'Order No'])
                 rtv_val_col = find_col(df_rtv, ['Return Value', 'Refund Amount'])
-                rtv_type_col = find_col(df_rtv, ['Return Type', 'Disposition', 'Reason']) # Fixed: Added Type Finding
+                rtv_type_col = find_col(df_rtv, ['Return Type', 'Disposition', 'Reason']) 
                 
                 df_rtv_clean = pd.DataFrame()
                 df_rtv_clean['Cust Order No'] = clean_order_id(df_rtv[rtv_order_col])
                 df_rtv_clean['Return Value'] = df_rtv[rtv_val_col].apply(clean_currency)
                 df_rtv_clean['Return Type'] = df_rtv[rtv_type_col] if rtv_type_col else ''
 
-                # Fixed: Aggregation to preserve Type
                 rtv_agg = {'Return Value': 'sum', 'Return Type': get_first_val}
                 df_rtv_clean = df_rtv_clean.groupby('Cust Order No', as_index=False).agg(rtv_agg)
 
-                # --- 3. PAYMENT PROCESSING (FIXED: Added Date Aggregation) ---
+                # --- 3. PAYMENT PROCESSING ---
                 pay_order_col = find_col(df_pay, ['Order No', 'Cust Order No'])
                 pay_val_col = find_col(df_pay, ['Value', 'Payment Amount'])
                 pay_date_col = find_col(df_pay, ['Expected settlement date', 'Settlement Date'])
@@ -452,11 +458,11 @@ def run_ajio_tool():
                     df_pay_clean['Settlement Date'] = df_pay[pay_date_col].astype(str).apply(parse_ajio_date)
                 else: df_pay_clean['Settlement Date'] = None
                 
-                # Fixed: Aggregation to preserve Date
+                # FIXED AGGREGATION
                 pay_agg = {'Payment Received': 'sum', 'Settlement Date': 'first'}
                 df_pay_clean = df_pay_clean.groupby('Cust Order No', as_index=False).agg(pay_agg)
 
-                # --- MERGE & CALCULATE ---
+                # --- MERGE ---
                 df_recon = pd.merge(df_gst_clean, df_rtv_clean, on='Cust Order No', how='outer')
                 df_recon = pd.merge(df_recon, df_pay_clean, on='Cust Order No', how='left')
                 df_recon.fillna(0, inplace=True)
@@ -480,7 +486,7 @@ def run_ajio_tool():
                 df_recon['Status'] = df_recon.apply(get_status, axis=1)
                 df_recon['Remarks'] = df_recon.apply(lambda x: f"Type: {x['Return Type']}" if x['Return Type'] else "Standard", axis=1)
 
-                # --- DISPLAY METRICS ---
+                # Metrics
                 total_sales = df_recon['Invoice Value'].sum()
                 total_ret = df_recon['Return Value'].sum()
                 total_exp = total_sales - total_ret
@@ -496,43 +502,30 @@ def run_ajio_tool():
                 m4.metric("Received", f"₹{total_rec:,.2f}")
                 m5.metric("Net Pending", f"₹{net_pend:,.2f}", delta="Receivable" if net_pend>0 else "Payable", delta_color="inverse" if net_pend>0 else "normal")
 
-                # --- SETTLEMENT TABLE ---
+                # Table
                 st.markdown("### 📅 Settlement Date-wise Analysis")
                 if 'Settlement Date' in df_recon.columns and df_recon['Settlement Date'].notna().any():
-                    # Filter rows with valid settlement date and ensure it's datetime
                     df_settle = df_recon.dropna(subset=['Settlement Date']).copy()
-                    
-                    # Safe conversion to datetime just in case
                     df_settle['Settlement Date'] = pd.to_datetime(df_settle['Settlement Date'], errors='coerce')
                     df_settle = df_settle.dropna(subset=['Settlement Date'])
-                    
                     if not df_settle.empty:
                         df_settle['Settlement Date'] = df_settle['Settlement Date'].dt.date
                         grp = df_settle.groupby('Settlement Date').agg({'Cust Order No':'count', 'Expected Payment':'sum', 'Payment Received':'sum', 'Final Difference':'sum'}).reset_index()
                         grp = grp.sort_values('Settlement Date')
-                        grp.columns = ['Date', 'Orders', 'Expected', 'Received', 'Diff']
-                        
-                        # Column Config for Settlement Table
                         st_conf = {
                             "Date": st.column_config.DateColumn("Settlement Date", format="DD-MMM-YYYY"),
                             "Expected": st.column_config.NumberColumn("Expected", format="₹%.2f"),
                             "Received": st.column_config.NumberColumn("Received", format="₹%.2f"),
                             "Diff": st.column_config.NumberColumn("Diff", format="₹%.2f"),
                         }
+                        grp.columns = ['Date', 'Orders', 'Expected', 'Received', 'Diff']
                         st.dataframe(grp, column_config=st_conf, use_container_width=True, hide_index=True)
-                    else:
-                        st.info("No valid settlement dates found after processing.")
-                else:
-                    st.info("No Settlement Dates found to generate timeline.")
 
-                # --- TABS & DATAFRAME DISPLAY ---
+                # Tabs
                 t1, t2, t3 = st.tabs(["🚨 Action", "✅ Settled", "📄 All Data"])
-                
-                # Ensure these columns exist before selecting
                 available_cols = ['Cust Order No', 'Invoice Date', 'Settlement Date', 'Invoice Value', 'Return Value', 'Expected Payment', 'Payment Received', 'Final Difference', 'Status', 'Remarks']
                 final_cols = [c for c in available_cols if c in df_recon.columns]
                 
-                # Column Configuration
                 col_config = {
                     "Cust Order No": st.column_config.TextColumn("Order ID"),
                     "Invoice Date": st.column_config.DateColumn("Inv Date", format="DD-MMM-YYYY"),
