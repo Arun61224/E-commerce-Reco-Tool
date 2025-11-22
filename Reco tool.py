@@ -229,11 +229,7 @@ def amz_create_final_reconciliation_df(df_log, df_payment, df_fees_summary, df_c
     df_final[payment_cols] = df_final[payment_cols].fillna(0)
     
     # Add Fees/Tax data (Fees Summary has only one row, so we cross-join using a 'Key' column)
-    # df_fees_summary is the 1-row DataFrame passed directly, which already contains the 'Key' column.
-    
     df_final['Key'] = 1
-    
-    # Merge the fees summary (1-row DF) with the main dataframe (cross-join)
     df_final = pd.merge(df_final, df_fees_summary, on='Key', how='left').drop(columns=['Key']).fillna(0)
 
     # 4. Proportionate Fee and Payment Allocation (Crucial Step)
@@ -258,29 +254,29 @@ def amz_create_final_reconciliation_df(df_log, df_payment, df_fees_summary, df_c
             # This assumes the total fees apply proportionally to all recorded MTR sales.
             df_final[col] = df_final[col] * df_final['Proportion']
     
-    # 5. Adjusted Product Cost based on Transaction Type
-    # Adjust Cost for Returns, Refunds, and Cancellations as per typical accounting rules
+    # 5. Adjusted Product Cost based on Transaction Type (Only retaining the logic requested)
     
     # Create a column for adjusted cost
     df_final['Adjusted_Product_Cost'] = df_final['Product_Cost'] * df_final['Quantity']
     
-    # Adjustments:
-    # Refund/Return: Often cost is partially recovered/adjusted. Using 50% here as an example.
+    # Adjustment Logic:
+    # 1. Return/Refund: Cost adjustment to 50%
     df_final.loc[df_final['Transaction Type'].str.contains('Refund|Return', case=False, na=False), 
                  'Adjusted_Product_Cost'] = df_final['Adjusted_Product_Cost'] * 0.5
                  
-    # Cancel: Sometimes a small fee is incurred, or cost is reversed. Using -20% of cost as reversal example.
+    # 2. Cancel: Cost adjustment to -20% (partial reversal)
     df_final.loc[df_final['Transaction Type'].str.contains('Cancel', case=False, na=False), 
                  'Adjusted_Product_Cost'] = df_final['Adjusted_Product_Cost'] * -0.2
                  
-    # Free Replacement: Often 0 cost impact on the reconciliation for the original item.
+    # 3. Free Replacement: Cost is 0
     df_final.loc[df_final['Transaction Type'].str.contains('FreeReplacement', case=False, na=False), 
                  'Adjusted_Product_Cost'] = 0
 
     # 6. Final Calculation: Profit/Loss per Item
-    # Profit/Loss = Net Payment - Total Fees - Adjusted Product Cost
+    # Profit/Loss = Net Payment + Total Tax/TCS/TDS - Total Fees - Adjusted Product Cost
+    # NOTE: Total_Tax_TCS_TDS is added to Net Payment as it is generally an amount recovered by seller.
     df_final['Product Profit/Loss'] = (df_final['Net Payment'] + 
-                                     df_final['Total_Tax_TCS_TDS'] - # Tax/TCS is usually credited back in final payment
+                                     df_final['Total_Tax_TCS_TDS'] - 
                                      df_final['Total_Fees_KPI'] - 
                                      df_final['Adjusted_Product_Cost'])
     
