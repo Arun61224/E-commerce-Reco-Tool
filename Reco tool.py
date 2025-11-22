@@ -184,6 +184,32 @@ def amz_process_mtr_files(uploaded_mtr_files):
 def amz_create_final_reconciliation_df(df_fin, df_log, df_cost):
     if df_log.empty or df_fin.empty: return pd.DataFrame()
     
+    # --- FILTER LOGIC: REMOVE CANCEL TRANSACTIONS THAT ALSO APPEAR AS SHIPMENTS ---
+    
+    # 1. Identify valid Shipment Order IDs (Set A)
+    # उन Order IDs को निकालो जिनका Transaction Type 'Shipment' है।
+    valid_shipment_orders = set(
+        df_log[df_log['Transaction Type'].astype(str).str.lower() == 'shipment']['OrderID'].unique()
+    )
+    
+    # 2. Filter df_log to apply the custom logic
+    df_log['TransType_Lower'] = df_log['Transaction Type'].astype(str).str.lower()
+    
+    # Check 1: Is the row a 'Cancel' transaction?
+    is_cancel_row = df_log['TransType_Lower'].str.contains('cancel', na=False)
+    
+    # Check 2: Does this OrderID also exist in the 'Shipment' set?
+    is_in_shipment = df_log['OrderID'].isin(valid_shipment_orders)
+    
+    # User's Logic: If (it is a Cancel) AND (it is also a Shipment), then REMOVE the Cancel row.
+    # The condition for removal is: is_cancel_row AND is_in_shipment
+    should_be_removed = (is_cancel_row) & (is_in_shipment)
+    
+    # Remove the rows that satisfy the removal condition.
+    df_log = df_log[~should_be_removed].copy()
+    df_log.drop(columns=['TransType_Lower'], inplace=True)
+    # ------------------------------------------------------------------------------------
+
     # --- Merge Logic with Indicator ---
     try:
         df_final = pd.merge(df_log, df_fin, on='OrderID', how='left', indicator='_merge_status')
@@ -226,7 +252,6 @@ def amz_create_final_reconciliation_df(df_fin, df_log, df_cost):
     df_final.loc[is_refund, 'Quantity'] = -1 * df_final.loc[is_refund, 'Quantity'].abs()
     
     # 2. Adjust Cost Logic
-    # Cancel now adjusted to -0.2 (20%) instead of -0.8 (80%)
     conditions = [is_refund, is_cancel]
     choices = [0.5 * df_final['Product Cost'], -0.2 * df_final['Product Cost']]
     df_final['Product Cost'] = np.select(conditions, choices, default=df_final['Product Cost'])
@@ -567,7 +592,7 @@ def run_ajio_tool():
 # MASTER EXECUTION
 # ==========================================
 st.sidebar.title("🔧 Navigation")
-tool_selection = st.sidebar.selectbox("Select Platform:", ["Amazon Reconciliation", "Ajio Reconciliation"]) # This was missing
+tool_selection = st.sidebar.selectbox("Select Platform:", ["Amazon Reconciliation", "Ajio Reconciliation"])
 
 if tool_selection == "Amazon Reconciliation":
     run_amazon_tool()
