@@ -16,7 +16,7 @@ tool_selection = st.sidebar.selectbox("Select Platform:", ["Amazon Reconciliatio
 st.sidebar.markdown("---")
 
 # ==========================================
-# MODULE 1: AMAZON RECONCILIATION (BREAKDOWN ADDED BACK)
+# MODULE 1: AMAZON RECONCILIATION (DATA FIX APPLIED)
 # ==========================================
 def run_amazon_tool():
     # --- HELPER FUNCTIONS ---
@@ -204,15 +204,27 @@ def run_amazon_tool():
 
         if 'Net_Payment_Fetched' in df_final.columns: df_final.rename(columns={'Net_Payment_Fetched': 'Net Payment'}, inplace=True)
         
+        # Cost Merge
         if not df_cost.empty:
-            df_final = pd.merge(df_final, df_cost, on='Sku', how='left')
+            try:
+                df_final = pd.merge(df_final, df_cost, on='Sku', how='left')
+            except: pass
+        
         if 'Product Cost' not in df_final.columns: df_final['Product Cost'] = 0.0
+        
+        # --- CRITICAL FIX: Data Cleanup before Logic ---
+        df_final.fillna(0, inplace=True) # Fills NaNs with 0
+        df_final['Product Cost'] = pd.to_numeric(df_final['Product Cost'], errors='coerce').fillna(0)
         
         # Refund/Cancel Logic
         trans_type = df_final['Transaction Type'].astype(str).str.strip().str.lower() if 'Transaction Type' in df_final.columns else pd.Series()
         conditions = [trans_type.isin(['refund', 'freereplacement']), trans_type.str.contains('cancel', na=False)]
         choices = [-0.5 * df_final['Product Cost'], -0.8 * df_final['Product Cost']]
         df_final['Product Cost'] = np.select(conditions, choices, default=df_final['Product Cost'])
+        
+        # Final Clean before Calc
+        df_final['Net Payment'] = pd.to_numeric(df_final['Net Payment'], errors='coerce').fillna(0)
+        df_final['Quantity'] = pd.to_numeric(df_final['Quantity'], errors='coerce').fillna(1).astype(int)
         
         df_final['Product Profit/Loss'] = df_final['Net Payment'] - (df_final['Product Cost'] * df_final['Quantity'])
         return df_final
@@ -280,7 +292,6 @@ def run_amazon_tool():
             
             k6.metric("TOTAL PROFIT/LOSS (Final)", f"INR {final_profit:,.2f}", delta=f"Other Expenses: INR {total_exp:,.2f}")
             
-            # --- BREAKDOWN ADDED BACK HERE ---
             st.markdown("**Monthly Expenses Breakdown:**")
             e1, e2, e3, e4 = st.columns(4)
             e1.metric("Storage Fee", f"INR {storage:,.2f}")
@@ -311,7 +322,7 @@ def run_amazon_tool():
             st.download_button("Download Full Excel Report", data=excel_data, file_name='amazon_reconciliation.xlsx')
 
     else:
-        # --- EMPTY STATE (BREAKDOWN ADDED BACK HERE TOO) ---
+        # --- EMPTY STATE ---
         total_exp = storage + ads + salary + misc
         st.subheader("Current Other Expenses Input (No Sales Data)")
         k1, k2 = st.columns(2)
