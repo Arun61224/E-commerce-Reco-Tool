@@ -235,8 +235,8 @@ def run_amazon_tool():
         df_final.loc[is_refund, 'Quantity'] = -1 * df_final.loc[is_refund, 'Quantity'].abs()
         
         # 2. Adjust Cost Logic (Updated to handle Negative Qty)
-        # Refund: 0.5 (Positive) * Cost. Because Qty is -1, Profit Logic: Pay - (0.5*Cost * -1) = Pay + 0.5*Cost (Recovery)
-        # Cancel: -0.8 (Negative) * Cost. Qty is 1. Profit Logic: Pay - (-0.8*Cost * 1) = Pay + 0.8*Cost (Recovery)
+        # Refund: 0.5 * Cost. Qty is -1. Profit = Pay - (0.5*Cost * -1) = Pay + 0.5*Cost (Recovered value added back)
+        # Cancel: -0.8 * Cost. Qty is 1. Profit = Pay - (-0.8*Cost * 1) = Pay + 0.8*Cost (Recovered value added back)
         conditions = [is_refund, is_cancel]
         choices = [0.5 * df_final['Product Cost'], -0.8 * df_final['Product Cost']]
         df_final['Product Cost'] = np.select(conditions, choices, default=df_final['Product Cost'])
@@ -244,6 +244,9 @@ def run_amazon_tool():
         # Final Clean before Calc
         df_final['Net Payment'] = pd.to_numeric(df_final['Net Payment'], errors='coerce').fillna(0)
         
+        # Profit Calculation: Net Payment - (Cost * Qty)
+        # For Sales (Qty 1): Pay - Cost (Normal)
+        # For Refund (Qty -1): Pay - (0.5*Cost * -1) = Pay + 0.5*Cost (Loss reduced by recovery)
         df_final['Product Profit/Loss'] = df_final['Net Payment'] - (df_final['Product Cost'] * df_final['Quantity'])
         return df_final
 
@@ -290,10 +293,17 @@ def run_amazon_tool():
             df_final = create_final_reconciliation_df(df_fin, df_log, df_cost)
             
             # KPIs
-            total_items = df_final.shape[0]
+            # Sum absolute quantity to show volume, or keep as net? Usually Volume is preferred for "Total Items"
+            # But if user wants net flow, sum is better. Let's stick to shape[0] for total lines or sum abs quantity.
+            # Sticking to shape[0] as per previous logic for "Total Items" (transaction lines).
+            total_items = df_final.shape[0] 
+            
             total_mtr = df_final['MTR Invoice Amount'].sum()
             total_pay = df_final['Net Payment'].sum()
             total_fees = df_final['Total_Fees_KPI'].sum()
+            
+            # Total Product Cost logic: Sum of (Cost * Qty). 
+            # Sales (1 * Cost) + Refunds (-1 * 0.5*Cost) = Net Cost Incurred
             total_cost = (df_final['Product Cost'] * df_final['Quantity']).sum()
             
             profit_before_exp = df_final['Product Profit/Loss'].sum()
