@@ -16,7 +16,7 @@ tool_selection = st.sidebar.selectbox("Select Platform:", ["Amazon Reconciliatio
 st.sidebar.markdown("---")
 
 # ==========================================
-# MODULE 1: AMAZON RECONCILIATION (DATA FIX APPLIED)
+# MODULE 1: AMAZON RECONCILIATION (BREAKDOWN ADDED BACK)
 # ==========================================
 def run_amazon_tool():
     # --- HELPER FUNCTIONS ---
@@ -192,7 +192,20 @@ def run_amazon_tool():
     @st.cache_data(show_spinner="Merging...")
     def create_final_reconciliation_df(df_fin, df_log, df_cost):
         if df_log.empty or df_fin.empty: return pd.DataFrame()
-        df_final = pd.merge(df_log, df_fin, on='OrderID', how='left')
+        
+        # --- UPDATED MERGE LOGIC WITH INDICATOR ---
+        try:
+            # Using indicator=True to checks which rows match
+            df_final = pd.merge(df_log, df_fin, on='OrderID', how='left', indicator='_merge_status')
+        except: return pd.DataFrame()
+        
+        # Add Remarks based on merge status
+        # 'left_only' implies present in MTR (df_log) but not in Payment (df_fin)
+        df_final['Remarks'] = np.where(df_final['_merge_status'] == 'left_only', 'Order ID is not in this Payment report', '')
+        
+        # Clean up the indicator column
+        df_final.drop(columns=['_merge_status'], inplace=True)
+        # -------------------------------------------
         
         # Calculations
         df_final['Total_MTR_per_Order'] = df_final.groupby('OrderID')['MTR Invoice Amount'].transform('sum')
@@ -213,7 +226,7 @@ def run_amazon_tool():
         if 'Product Cost' not in df_final.columns: df_final['Product Cost'] = 0.0
         
         # --- CRITICAL FIX: Data Cleanup before Logic ---
-        df_final.fillna(0, inplace=True) # Fills NaNs with 0
+        df_final.fillna(0, inplace=True) 
         df_final['Product Cost'] = pd.to_numeric(df_final['Product Cost'], errors='coerce').fillna(0)
         
         # Refund/Cancel Logic
@@ -292,6 +305,7 @@ def run_amazon_tool():
             
             k6.metric("TOTAL PROFIT/LOSS (Final)", f"INR {final_profit:,.2f}", delta=f"Other Expenses: INR {total_exp:,.2f}")
             
+            # --- BREAKDOWN ADDED BACK HERE ---
             st.markdown("**Monthly Expenses Breakdown:**")
             e1, e2, e3, e4 = st.columns(4)
             e1.metric("Storage Fee", f"INR {storage:,.2f}")
@@ -315,6 +329,10 @@ def run_amazon_tool():
             num_cols = ['MTR Invoice Amount', 'Net Payment', 'Total_Commission_Fee', 'Total_Fixed_Closing_Fee', 'Total_FBA_Pick_Pack_Fee', 'Total_FBA_Weight_Handling_Fee', 'Total_Technology_Fee', 'Total_Fees_KPI', 'Total_Tax_TCS_TDS', 'Product Cost', 'Product Profit/Loss']
             col_conf = {c: st.column_config.NumberColumn(format="INR %.2f") for c in num_cols}
             
+            # --- ADDING REMARKS TO TABLE VIEW ---
+            if 'Remarks' in df_disp.columns:
+                col_conf['Remarks'] = st.column_config.TextColumn("Status/Remarks", help="Checks if order is found in Payment Report")
+
             st.dataframe(df_disp, column_config=col_conf, use_container_width=True, hide_index=True)
             
             st.markdown("---")
@@ -322,7 +340,7 @@ def run_amazon_tool():
             st.download_button("Download Full Excel Report", data=excel_data, file_name='amazon_reconciliation.xlsx')
 
     else:
-        # --- EMPTY STATE ---
+        # --- EMPTY STATE (BREAKDOWN ADDED BACK HERE TOO) ---
         total_exp = storage + ads + salary + misc
         st.subheader("Current Other Expenses Input (No Sales Data)")
         k1, k2 = st.columns(2)
