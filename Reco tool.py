@@ -184,15 +184,14 @@ def amz_process_mtr_files(uploaded_mtr_files):
 def amz_create_final_reconciliation_df(df_fin, df_log, df_cost):
     if df_log.empty or df_fin.empty: return pd.DataFrame()
     
-    # --- FILTER LOGIC: REMOVE CANCEL TRANSACTIONS THAT ALSO APPEAR AS SHIPMENTS ---
+    # --- 1. FILTER LOGIC: REMOVE CANCEL TRANSACTIONS THAT ALSO APPEAR AS SHIPMENTS ---
     
-    # 1. Identify valid Shipment Order IDs (Set A)
-    # उन Order IDs को निकालो जिनका Transaction Type 'Shipment' है।
+    # Identify valid Shipment Order IDs (Set A)
     valid_shipment_orders = set(
         df_log[df_log['Transaction Type'].astype(str).str.lower() == 'shipment']['OrderID'].unique()
     )
     
-    # 2. Filter df_log to apply the custom logic
+    # Filter df_log to apply the custom logic
     df_log['TransType_Lower'] = df_log['Transaction Type'].astype(str).str.lower()
     
     # Check 1: Is the row a 'Cancel' transaction?
@@ -201,8 +200,7 @@ def amz_create_final_reconciliation_df(df_fin, df_log, df_cost):
     # Check 2: Does this OrderID also exist in the 'Shipment' set?
     is_in_shipment = df_log['OrderID'].isin(valid_shipment_orders)
     
-    # User's Logic: If (it is a Cancel) AND (it is also a Shipment), then REMOVE the Cancel row.
-    # The condition for removal is: is_cancel_row AND is_in_shipment
+    # The condition for removal: is a Cancel AND exists as a Shipment.
     should_be_removed = (is_cancel_row) & (is_in_shipment)
     
     # Remove the rows that satisfy the removal condition.
@@ -210,7 +208,7 @@ def amz_create_final_reconciliation_df(df_fin, df_log, df_cost):
     df_log.drop(columns=['TransType_Lower'], inplace=True)
     # ------------------------------------------------------------------------------------
 
-    # --- Merge Logic with Indicator ---
+    # --- 2. Merge Logic with Indicator ---
     try:
         df_final = pd.merge(df_log, df_fin, on='OrderID', how='left', indicator='_merge_status')
     except: return pd.DataFrame()
@@ -237,23 +235,34 @@ def amz_create_final_reconciliation_df(df_fin, df_log, df_cost):
     
     if 'Product Cost' not in df_final.columns: df_final['Product Cost'] = 0.0
     
-    # --- DATA CLEANUP ---
+    # --- 3. DATA CLEANUP ---
     df_final.fillna(0, inplace=True) 
     df_final['Product Cost'] = pd.to_numeric(df_final['Product Cost'], errors='coerce').fillna(0)
     df_final['Quantity'] = pd.to_numeric(df_final['Quantity'], errors='coerce').fillna(1).astype(int)
     
-    # --- REFUND/CANCEL LOGIC ---
+    # --- 4. REFUND/CANCEL/FREEREPLACEMENT COST LOGIC ---
     trans_type = df_final['Transaction Type'].astype(str).str.strip().str.lower() if 'Transaction Type' in df_final.columns else pd.Series()
     
-    is_refund = trans_type.isin(['refund', 'freereplacement'])
+    is_refund = trans_type.isin(['refund'])
     is_cancel = trans_type.str.contains('cancel', na=False)
+    is_freereplacement = trans_type.isin(['freereplacement']) # New condition for FreeReplacement
     
     # 1. Make Quantity Negative ONLY for Refunds
     df_final.loc[is_refund, 'Quantity'] = -1 * df_final.loc[is_refund, 'Quantity'].abs()
     
-    # 2. Adjust Cost Logic
-    conditions = [is_refund, is_cancel]
-    choices = [0.5 * df_final['Product Cost'], -0.2 * df_final['Product Cost']]
+    # 2. Adjust Cost Logic based on transaction type
+    conditions = [
+        is_freereplacement,  # FreeReplacement: Product Cost = 0
+        is_refund,           # Refund: Product Cost = 50%
+        is_cancel            # Cancel: Product Cost = -20% (Negative 20% of original cost)
+    ]
+    choices = [
+        0,                                   # For FreeReplacement
+        0.5 * df_final['Product Cost'],      # For Refund
+        -0.2 * df_final['Product Cost']      # For Cancel
+    ]
+    
+    # Apply cost adjustment. Default value is the original Product Cost (for 'Shipment' etc.)
     df_final['Product Cost'] = np.select(conditions, choices, default=df_final['Product Cost'])
     
     # Final Clean before Calc
